@@ -1,0 +1,37 @@
+apiVersion: v1
+entries:
+  agent-operator:
+  - annotations:
+      artifacthub.io/license: Apache-2.0
+      artifacthub.io/links: |
+        - name: GitHub
+          url: https://github.com/nucel-dev/agent-operator
+        - name: Documentation
+          url: https://github.com/nucel-dev/agent-operator#readme
+    apiVersion: v2
+    appVersion: 0.1.0
+    created: "2026-03-22T23:17:33.995018247Z"
+    description: Kubernetes operator that drives AI agents to autonomously resolve
+      issues — connect any GitHub repo + Paperclip board, get PRs from an AI team.
+    digest: 91a22d8185756d3ee7f6023e470d9101dcaa2691bc23a2bf6955dd32d9581f15
+    home: https://nucel.dev
+    keywords:
+    - operator
+    - kubernetes
+    - ai
+    - agents
+    - automation
+    - paperclip
+    - devops
+    maintainers:
+    - email: hello@nucel.dev
+      name: Nucel
+      url: https://nucel.dev
+    name: agent-operator
+    sources:
+    - https://github.com/nucel-dev/agent-operator
+    type: application
+    urls:
+    - https://github.com/nucel-dev/charts/releases/download/agent-operator-0.1.0/agent-operator-0.1.0.tgz
+    version: 0.1.0
+generated: "2026-03-22T23:17:33.995023197Z"
