@@ -1,0 +1,163 @@
+{{- if .Values.crd.install }}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: agenttasks.agenttask.io
+  labels:
+    {{- include "agent-operator.labels" . | nindent 4 }}
+spec:
+  group: agenttask.io
+  names:
+    categories: []
+    kind: AgentTask
+    plural: agenttasks
+    shortNames: []
+    singular: agenttask
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .spec.issueRef
+      name: Issue
+      type: string
+    - jsonPath: .status.localTestAttempts
+      name: Local
+      type: string
+    - jsonPath: .status.ciAttempts
+      name: CI
+      type: string
+    - jsonPath: .status.totalCostUsd
+      name: Cost
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for AgentTaskSpec via `CustomResource`
+        properties:
+          spec:
+            description: Spec for an AgentTask — the desired state provided by the user.
+            properties:
+              agentModel:
+                default: claude-opus-4-6
+                description: Claude model identifier (e.g. `"claude-opus-4-6"`).
+                type: string
+              baseBranch:
+                description: Target branch to merge fixes into.
+                type: string
+              contextSources:
+                description: Additional knowledge sources to inject into agent context.
+                items:
+                  description: A knowledge source to inject into the agent's context.
+                  properties:
+                    kind:
+                      description: 'Source kind: `"confluence"`, `"github-wiki"`, `"notion"`.'
+                      type: string
+                    sourceRef:
+                      description: Provider-specific reference (space key, repo name, page ID, etc.).
+                      type: string
+                  required:
+                  - kind
+                  - sourceRef
+                  type: object
+                nullable: true
+                type: array
+              issueRef:
+                description: Provider-agnostic issue reference (e.g. `"org/repo#42"` or `"PROJ-42"`).
+                type: string
+              maxBudgetUsd:
+                default: 5.0
+                description: Maximum spend in USD before the agent is stopped.
+                format: double
+                type: number
+              maxCiAttempts:
+                description: Maximum CI fix iterations before escalation.
+                format: uint32
+                minimum: 0.0
+                nullable: true
+                type: integer
+              maxLocalAttempts:
+                description: Maximum local test-fix iterations before escalation.
+                format: uint32
+                minimum: 0.0
+                nullable: true
+                type: integer
+              priority:
+                default: medium
+                description: 'Scheduling priority: `"low"`, `"medium"`, `"high"`, `"critical"`.'
+                type: string
+              repoRef:
+                description: Repository reference (e.g. `"org/repo"`).
+                type: string
+              testCommand:
+                default: cargo test
+                description: Shell command to run tests (e.g. `"cargo test"`, `"npm test"`).
+                type: string
+            required:
+            - baseBranch
+            - issueRef
+            - repoRef
+            type: object
+          status:
+            description: Status for an AgentTask — the observed state managed by the operator.
+            nullable: true
+            properties:
+              branchName:
+                description: Working branch name created for this task.
+                nullable: true
+                type: string
+              ciAttempts:
+                default: 0
+                description: Number of CI fix iterations attempted.
+                format: uint32
+                minimum: 0.0
+                type: integer
+              completedAt:
+                description: ISO 8601 timestamp when the task reached a terminal state.
+                nullable: true
+                type: string
+              errorMessage:
+                description: Human-readable error message if the task failed.
+                nullable: true
+                type: string
+              localTestAttempts:
+                default: 0
+                description: Number of local test-fix iterations attempted.
+                format: uint32
+                minimum: 0.0
+                type: integer
+              phase:
+                default: Pending
+                description: Current phase (Pending, Enriching, Scheduled, Implementing, …).
+                type: string
+              prUrl:
+                description: URL of the pull request created by the agent.
+                nullable: true
+                type: string
+              sessionId:
+                description: Agent session ID for resumption.
+                nullable: true
+                type: string
+              startedAt:
+                description: ISO 8601 timestamp when the task was first started.
+                nullable: true
+                type: string
+              totalCostUsd:
+                default: 0.0
+                description: Total spend in USD so far.
+                format: double
+                type: number
+            type: object
+        required:
+        - spec
+        title: AgentTask
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+{{- end }}

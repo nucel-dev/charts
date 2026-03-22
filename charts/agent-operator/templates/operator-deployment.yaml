@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agent-operator.fullname" . }}
+  namespace: {{ include "agent-operator.namespace" . }}
+  labels:
+    {{- include "agent-operator.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.operator.replicas }}
+  selector:
+    matchLabels:
+      {{- include "agent-operator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agent-operator.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: {{ include "agent-operator.fullname" . }}
+      containers:
+        - name: operator
+          image: {{ include "agent-operator.operatorImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["agent-operator-operator"]
+          ports:
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          env:
+            - name: RUST_LOG
+              value: "info,agent_operator_operator=debug"
+            - name: OPERATOR_NAMESPACE
+              value: {{ include "agent-operator.namespace" . | quote }}
+            - name: OPERATOR_CONFIG
+              value: "/etc/agent-operator/config.toml"
+            - name: WORKER_IMAGE
+              value: {{ include "agent-operator.workerImage" . | quote }}
+            {{- if eq .Values.config.github.auth "app" }}
+            - name: GITHUB_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agent-operator.secretName" . }}
+                  key: github-app-id
+            - name: GITHUB_APP_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agent-operator.secretName" . }}
+                  key: github-app-private-key
+            - name: GITHUB_APP_INSTALLATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agent-operator.secretName" . }}
+                  key: github-app-installation-id
+            {{- else }}
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agent-operator.secretName" . }}
+                  key: github-token
+            {{- end }}
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agent-operator.secretName" . }}
+                  key: anthropic-api-key
+          volumeMounts:
+            - name: config
+              mountPath: /etc/agent-operator
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.operator.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "agent-operator.configMapName" . }}

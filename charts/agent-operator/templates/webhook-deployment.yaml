@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agent-operator.fullname" . }}-webhook
+  namespace: {{ include "agent-operator.namespace" . }}
+  labels:
+    {{- include "agent-operator.webhookLabels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.webhook.replicas }}
+  selector:
+    matchLabels:
+      {{- include "agent-operator.webhookSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agent-operator.webhookSelectorLabels" . | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: {{ include "agent-operator.fullname" . }}-webhook
+      containers:
+        - name: webhook
+          image: {{ include "agent-operator.webhookImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["agent-operator-webhook"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.webhook.service.port }}
+              protocol: TCP
+          env:
+            - name: WEBHOOK_PORT
+              value: {{ .Values.webhook.service.port | quote }}
+            - name: OPERATOR_NAMESPACE
+              value: {{ include "agent-operator.namespace" . | quote }}
+            - name: JIRA_TRIGGER_STATUS
+              value: "In Progress"
+            - name: GITHUB_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agent-operator.webhookSecretName" . }}
+                  key: github-webhook-secret
+            - name: JIRA_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agent-operator.webhookSecretName" . }}
+                  key: jira-webhook-secret
+                  optional: true
+            - name: WEBHOOK_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agent-operator.webhookSecretName" . }}
+                  key: api-token
+            - name: RUST_LOG
+              value: "info"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.webhook.resources | nindent 12 }}

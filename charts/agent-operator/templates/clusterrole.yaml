@@ -1,0 +1,41 @@
+---
+# Operator ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "agent-operator.fullname" . }}
+  labels:
+    {{- include "agent-operator.labels" . | nindent 4 }}
+rules:
+  # AgentTask CRD management
+  - apiGroups: ["agenttask.io"]
+    resources: ["agenttasks", "agenttasks/status", "agenttasks/finalizers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Job management (spawn worker Jobs, clean up after completion)
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Pod monitoring (read worker pod logs and status)
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  # Events (emit operator events for debugging)
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # ConfigMap reads (per-repo config, operator config)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+# Webhook ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "agent-operator.fullname" . }}-webhook
+  labels:
+    {{- include "agent-operator.webhookLabels" . | nindent 4 }}
+rules:
+  - apiGroups: ["agenttask.io"]
+    resources: ["agenttasks"]
+    verbs: ["get", "list", "create"]

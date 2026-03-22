@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "agent-operator.configMapName" . }}
+  namespace: {{ include "agent-operator.namespace" . }}
+  labels:
+    {{- include "agent-operator.labels" . | nindent 4 }}
+data:
+  config.toml: |
+    [providers]
+    git = {{ .Values.config.providers.git | quote }}
+    issues = {{ .Values.config.providers.issues | quote }}
+    knowledge = {{ .Values.config.providers.knowledge | quote }}
+    agent = {{ .Values.config.providers.agent | quote }}
+    ci = {{ .Values.config.providers.ci | quote }}
+    secrets = {{ .Values.config.providers.secrets | quote }}
+    workspace = {{ .Values.config.providers.workspace | quote }}
+
+    [github]
+    auth = {{ .Values.config.github.auth | quote }}
+    {{- if eq .Values.config.github.auth "app" }}
+    app_id_env = "GITHUB_APP_ID"
+    private_key_env = "GITHUB_APP_PRIVATE_KEY"
+    installation_id_env = "GITHUB_APP_INSTALLATION_ID"
+    {{- else }}
+    pat_env = "GITHUB_TOKEN"
+    {{- end }}
+
+    [notifications]
+    channels = [{{ range $i, $ch := .Values.config.notifications.channels }}{{ if $i }}, {{ end }}{{ $ch | quote }}{{ end }}]
+    notify_on_completion = {{ .Values.config.notifications.notifyOnCompletion }}
+    notify_on_failure = {{ .Values.config.notifications.notifyOnFailure }}
+    notify_on_escalation = {{ .Values.config.notifications.notifyOnEscalation }}
+
+    [concurrency]
+    max_concurrent_tasks = {{ .Values.config.concurrency.maxConcurrentTasks }}
+    max_tasks_per_repo = {{ .Values.config.concurrency.maxTasksPerRepo }}
+
+    [escalation]
+    enabled = {{ .Values.config.escalation.enabled }}
+    provider = {{ .Values.config.escalation.provider | quote }}
+    trigger_after_local_attempts = {{ .Values.config.escalation.triggerAfterLocalAttempts }}
+    trigger_after_ci_attempts = {{ .Values.config.escalation.triggerAfterCiAttempts }}
+    trigger_on_agent_uncertainty = {{ .Values.config.escalation.triggerOnAgentUncertainty }}
+    trigger_on_loop_detection = {{ .Values.config.escalation.triggerOnLoopDetection }}
+    trigger_on_stagnant_failures = {{ .Values.config.escalation.triggerOnStagnantFailures }}
+    confidence_threshold = {{ .Values.config.escalation.confidenceThreshold }}
+    file_churn_threshold = {{ .Values.config.escalation.fileChurnThreshold }}
+    auto_assign_to = {{ .Values.config.escalation.autoAssignTo | quote }}
+    workspace_template = {{ .Values.config.escalation.workspaceTemplate | quote }}
+    workspace_ttl_hours = {{ .Values.config.escalation.workspaceTtlHours }}
+
+    [defaults]
+    model = {{ .Values.config.defaults.model | quote }}
+    max_budget_usd = {{ .Values.config.defaults.maxBudgetUsd }}
+    max_local_attempts = {{ .Values.config.defaults.maxLocalAttempts }}
+    max_ci_attempts = {{ .Values.config.defaults.maxCiAttempts }}
+    priority = {{ .Values.config.defaults.priority | quote }}
+
+    [budgets]
+    default_daily_limit_usd = {{ .Values.config.budgets.defaultDailyLimitUsd }}
+    default_monthly_limit_usd = {{ .Values.config.budgets.defaultMonthlyLimitUsd }}
+    {{- range $repo, $limits := .Values.config.budgets.repos }}
+
+    [budgets.repos."{{ $repo }}"]
+    daily_limit_usd = {{ $limits.dailyLimitUsd }}
+    monthly_limit_usd = {{ $limits.monthlyLimitUsd }}
+    {{- end }}

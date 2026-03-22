@@ -1,0 +1,141 @@
+# -- Image configuration shared by operator and webhook
+image:
+  repository: agent-operator
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# -- Operator deployment settings
+operator:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# -- Webhook deployment settings
+webhook:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  service:
+    type: ClusterIP
+    port: 8080
+
+# -- Worker (Jobs spawned by operator -- resource limits only)
+worker:
+  image:
+    # defaults to image.repository if empty
+    repository: ""
+    # defaults to image.tag if empty
+    tag: ""
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2
+      memory: 2Gi
+
+# -- Ingress for webhook
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: agent-operator.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# -- Secrets
+secrets:
+  # Set to false to manage secrets externally
+  create: true
+  githubAppId: ""
+  githubAppPrivateKey: ""  # base64-encoded PEM
+  githubAppInstallationId: ""
+  githubToken: ""
+  anthropicApiKey: ""
+  webhookApiToken: ""
+  githubWebhookSecret: ""
+  jiraWebhookSecret: ""
+
+# -- Namespace
+namespace:
+  create: true
+  name: agent-operator-system
+
+# -- CRD
+crd:
+  install: true
+
+# -- Operator configuration (maps to config/default.toml)
+config:
+  providers:
+    git: github
+    issues: github
+    knowledge: none
+    agent: claude
+    ci: github-actions
+    secrets: env
+    workspace: notify-only
+  github:
+    auth: app
+  notifications:
+    channels: []
+    notifyOnCompletion: false
+    notifyOnFailure: true
+    notifyOnEscalation: true
+  concurrency:
+    maxConcurrentTasks: 5
+    maxTasksPerRepo: 2
+  escalation:
+    enabled: false
+    provider: notify-only
+    triggerAfterLocalAttempts: 3
+    triggerAfterCiAttempts: 3
+    triggerOnAgentUncertainty: true
+    triggerOnLoopDetection: true
+    triggerOnStagnantFailures: true
+    confidenceThreshold: 0.3
+    fileChurnThreshold: 0.7
+    autoAssignTo: original_assignee
+    workspaceTemplate: ""
+    workspaceTtlHours: 8
+  defaults:
+    model: claude-opus-4-6
+    maxBudgetUsd: 5.0
+    maxLocalAttempts: 3
+    maxCiAttempts: 3
+    priority: medium
+  budgets:
+    defaultDailyLimitUsd: 50.0
+    defaultMonthlyLimitUsd: 500.0
+    repos: {}
+    # Example per-repo overrides:
+    # repos:
+    #   "org/expensive-repo":
+    #     dailyLimitUsd: 200.0
+    #     monthlyLimitUsd: 2000.0
+
+# -- Monitoring (Prometheus & Grafana)
+monitoring:
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}
+    namespace: ""
+  grafana:
+    dashboards:
+      enabled: false
+      label: grafana_dashboard
+      labelValue: "1"

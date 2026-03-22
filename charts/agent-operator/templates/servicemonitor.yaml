@@ -1,0 +1,39 @@
+{{- if .Values.monitoring.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "agent-operator.fullname" . }}-operator
+  namespace: {{ .Values.monitoring.serviceMonitor.namespace | default (include "agent-operator.namespace" .) }}
+  labels:
+    {{- include "agent-operator.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "agent-operator.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: metrics
+      interval: {{ .Values.monitoring.serviceMonitor.interval }}
+      path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "agent-operator.fullname" . }}-webhook
+  namespace: {{ .Values.monitoring.serviceMonitor.namespace | default (include "agent-operator.namespace" .) }}
+  labels:
+    {{- include "agent-operator.webhookLabels" . | nindent 4 }}
+    {{- with .Values.monitoring.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "agent-operator.webhookSelectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      interval: {{ .Values.monitoring.serviceMonitor.interval }}
+      path: /metrics
+{{- end }}
