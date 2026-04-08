@@ -1,0 +1,78 @@
+# -- nucel-server image
+image:
+  repository: ghcr.io/nucel-dev/nucel-server
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# -- Server deployment
+server:
+  replicas: 1
+  port: 17321
+  sshPort: 2222
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+# -- Domain and OIDC
+domain: nucel.dev
+oidc:
+  issuer: "https://nucel.dev"
+
+# -- SurrealDB
+surrealdb:
+  image: surrealdb/surrealdb:v2.6
+  storage: 20Gi
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+# -- Persistent storage sizes
+storage:
+  repos: 50Gi
+  ciData: 50Gi
+  registry: 20Gi
+  npm: 10Gi
+  storageClassName: ""
+
+# -- Ingress
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # cert-manager.io/cluster-issuer: letsencrypt-prod
+  tls: true
+
+# -- Secrets (set create: false to manage externally)
+secrets:
+  create: true
+  dbUser: root
+  dbPass: ""
+  ciRunnerToken: ""
+  hookSecret: ""
+  oidcPrivateKey: ""
+
+# -- Namespace
+namespace:
+  create: true
+  name: nucel
+
+# -- CI namespace (for PipelineJobRun CRDs)
+ciNamespace: nucel-ci
+
+# -- CI Operator (set enabled: true to deploy runner secret)
+ciOperator:
+  enabled: true
+  runnerToken: ""
+
+# -- Logging
+logging:
+  level: info
+  rustLog: "info,nucel_server=info,tower_http=warn"

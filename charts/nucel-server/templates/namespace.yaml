@@ -1,0 +1,15 @@
+{{- if .Values.namespace.create }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "nucel.namespace" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.ciNamespace }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+{{- end }}

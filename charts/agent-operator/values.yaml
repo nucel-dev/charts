@@ -68,6 +68,9 @@ secrets:
   webhookApiToken: ""
   githubWebhookSecret: ""
   jiraWebhookSecret: ""
+  # nucel-git integration
+  nucelGitApiKey: ""         # PAT or OIDC JWT for nucel-git API
+  nucelGitWebhookSecret: ""  # HMAC secret for /webhooks/nucel-git
 
 # -- Namespace
 namespace:
@@ -126,6 +129,12 @@ config:
     #   "org/expensive-repo":
     #     dailyLimitUsd: 200.0
     #     monthlyLimitUsd: 2000.0
+
+  # -- nucel-git connection (used when providers.git/issues/ci = "nucel-git")
+  nucelGit:
+    baseUrl: "https://git.nucel.io"
+    # API key injected from secrets.nucelGitApiKey
+    # Webhook secret injected from secrets.nucelGitWebhookSecret
 
 # -- Monitoring (Prometheus & Grafana)
 monitoring:

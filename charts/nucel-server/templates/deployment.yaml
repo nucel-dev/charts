@@ -1,0 +1,101 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nucel-server
+  namespace: {{ include "nucel.namespace" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+  annotations:
+    checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+spec:
+  replicas: {{ .Values.server.replicas }}
+  selector:
+    matchLabels:
+      {{- include "nucel.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nucel.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "nucel.serviceAccountName" . }}
+      containers:
+        - name: server
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.server.port }}
+              name: http
+            - containerPort: {{ .Values.server.sshPort }}
+              name: ssh
+          envFrom:
+            - configMapRef:
+                name: {{ include "nucel.configMapName" . }}
+          env:
+            - name: NUCEL_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" . }}
+                  key: NUCEL_DB_USER
+            - name: NUCEL_DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" . }}
+                  key: NUCEL_DB_PASS
+            - name: NUCEL_CI_RUNNER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" . }}
+                  key: NUCEL_CI_RUNNER_TOKEN
+            - name: NUCEL_HOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" . }}
+                  key: NUCEL_HOOK_SECRET
+            {{- if .Values.secrets.oidcPrivateKey }}
+            - name: NUCEL_OIDC_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" . }}
+                  key: NUCEL_OIDC_PRIVATE_KEY
+            {{- end }}
+          volumeMounts:
+            - name: repos
+              mountPath: /data/repos
+            - name: ci-data
+              mountPath: /data/ci
+            - name: registry
+              mountPath: /data/registry
+            - name: npm
+              mountPath: /data/npm
+            - name: workspaces
+              mountPath: /data/workspaces
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.server.resources | nindent 12 }}
+      volumes:
+        - name: repos
+          persistentVolumeClaim:
+            claimName: nucel-repos
+        - name: ci-data
+          persistentVolumeClaim:
+            claimName: nucel-ci-data
+        - name: registry
+          persistentVolumeClaim:
+            claimName: nucel-registry
+        - name: npm
+          persistentVolumeClaim:
+            claimName: nucel-npm
+        - name: workspaces
+          emptyDir: {}

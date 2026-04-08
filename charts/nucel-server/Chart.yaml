@@ -1,0 +1,28 @@
+apiVersion: v2
+name: nucel-server
+description: Self-hosted git platform with built-in CI/CD, container registry, and AI agent orchestration.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://nucel.dev
+sources:
+  - https://github.com/nucel-dev/nucel
+keywords:
+  - git
+  - ci-cd
+  - devops
+  - self-hosted
+  - kubernetes
+  - ai-agents
+  - container-registry
+maintainers:
+  - name: Nucel
+    email: hello@nucel.dev
+    url: https://nucel.dev
+annotations:
+  artifacthub.io/license: MIT
+  artifacthub.io/links: |
+    - name: GitHub
+      url: https://github.com/nucel-dev/nucel
+    - name: Documentation
+      url: https://github.com/nucel-dev/nucel#readme

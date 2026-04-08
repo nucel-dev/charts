@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nucel.configMapName" . }}
+  namespace: {{ include "nucel.namespace" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+data:
+  NUCEL_HOST: "0.0.0.0"
+  NUCEL_PORT: {{ .Values.server.port | quote }}
+  NUCEL_SSH_PORT: {{ .Values.server.sshPort | quote }}
+  NUCEL_DB_URL: "ws://surrealdb.{{ include "nucel.namespace" . }}.svc.cluster.local:8000"
+  NUCEL_DB_NS: "nucel"
+  NUCEL_DB_DB: "main"
+  NUCEL_REPO_BASE_PATH: "/data/repos"
+  NUCEL_LOG_PATH: "/data/ci/logs"
+  NUCEL_ARTIFACT_PATH: "/data/ci/artifacts"
+  NUCEL_WORKSPACE_PATH: "/data/workspaces"
+  NUCEL_REGISTRY_PATH: "/data/registry"
+  NUCEL_NPM_PATH: "/data/npm"
+  NUCEL_LOG_LEVEL: {{ .Values.logging.level | quote }}
+  RUST_LOG: {{ .Values.logging.rustLog | quote }}
+  NUCEL_OIDC_ISSUER: {{ .Values.oidc.issuer | quote }}
+  NUCEL_CI_K8S_NAMESPACE: {{ .Values.ciNamespace | quote }}
+  NUCEL_CI_API_URL: "http://nucel-server.{{ include "nucel.namespace" . }}.svc.cluster.local:{{ .Values.server.port }}"

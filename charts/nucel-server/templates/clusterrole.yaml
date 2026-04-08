@@ -1,0 +1,26 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "nucel.fullname" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+rules:
+  # nucel-server creates PipelineJobRun CRDs for K8s CI dispatch
+  - apiGroups: ["nucel.io"]
+    resources: ["pipelinejobruns"]
+    verbs: ["get", "list", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "nucel.fullname" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "nucel.serviceAccountName" . }}
+    namespace: {{ include "nucel.namespace" . }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "nucel.fullname" . }}
+  apiGroup: rbac.authorization.k8s.io

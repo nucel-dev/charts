@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: nucel-server
+  namespace: {{ include "nucel.namespace" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "nucel.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.server.port }}
+      targetPort: http
+    - name: ssh
+      port: {{ .Values.server.sshPort }}
+      targetPort: ssh

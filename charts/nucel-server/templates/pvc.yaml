@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nucel-repos
+  namespace: {{ include "nucel.namespace" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- if .Values.storage.storageClassName }}
+  storageClassName: {{ .Values.storage.storageClassName }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.repos }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nucel-ci-data
+  namespace: {{ include "nucel.namespace" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- if .Values.storage.storageClassName }}
+  storageClassName: {{ .Values.storage.storageClassName }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.ciData }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nucel-registry
+  namespace: {{ include "nucel.namespace" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- if .Values.storage.storageClassName }}
+  storageClassName: {{ .Values.storage.storageClassName }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.registry }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nucel-npm
+  namespace: {{ include "nucel.namespace" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- if .Values.storage.storageClassName }}
+  storageClassName: {{ .Values.storage.storageClassName }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.npm }}
