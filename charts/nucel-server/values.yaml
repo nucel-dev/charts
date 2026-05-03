@@ -22,8 +22,12 @@ domain: nucel.dev
 oidc:
   issuer: "https://nucel.dev"
 
-# -- SurrealDB
+# -- SurrealDB. Set deploy=false when running an external SurrealDB
+# (e.g. multi-replica HA against a TiKV cluster managed outside this chart).
+# nucel-server still expects a Service named "surrealdb" on port 8000 in
+# the same namespace — provide one externally when deploy=false.
 surrealdb:
+  deploy: true
   image: surrealdb/surrealdb:v2.6
   storage: 20Gi
   resources:
