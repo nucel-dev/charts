@@ -19,6 +19,17 @@ spec:
         {{- include "nucel.selectorLabels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "nucel.serviceAccountName" . }}
+      # PVCs land at /data/* via the EBS CSI driver. EKS Auto Mode +
+      # Bottlerocket attach the volume root-owned with 0755 mode, but
+      # the kubelet only chowns the mount when fsGroup is set —
+      # without it, root inside the container hits EACCES on
+      # create_dir_all because the kernel-side mount uid/gid don't
+      # match the container's. Setting fsGroup: 0 (root group) +
+      # OnRootMismatch makes the kubelet fix-up the ownership on
+      # every attach, fast (only chmods the root if it diverges).
+      securityContext:
+        fsGroup: 0
+        fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: server
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
