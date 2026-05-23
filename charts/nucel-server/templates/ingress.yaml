@@ -8,7 +8,9 @@ metadata:
     {{- include "nucel.labels" . | nindent 4 }}
   {{- with .Values.ingress.annotations }}
   annotations:
-    {{- toYaml . | nindent 4 }}
+    {{- range $key, $value := . }}
+    {{ $key }}: {{ $value | quote }}
+    {{- end }}
   {{- end }}
 spec:
   {{- if .Values.ingress.className }}
@@ -16,9 +18,13 @@ spec:
   {{- end }}
   {{- if .Values.ingress.tls }}
   tls:
+    {{- if kindIs "slice" .Values.ingress.tls }}
+    {{- toYaml .Values.ingress.tls | nindent 4 }}
+    {{- else }}
     - hosts:
         - {{ .Values.domain }}
-      secretName: nucel-tls
+      secretName: {{ .Values.ingress.tlsSecretName | default (printf "%s-tls" (include "nucel.fullname" .)) }}
+    {{- end }}
   {{- end }}
   rules:
     - host: {{ .Values.domain }}

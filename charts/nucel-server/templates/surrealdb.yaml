@@ -17,6 +17,12 @@ spec:
       labels:
         {{- include "nucel.surrealdbLabels" . | nindent 8 }}
     spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: surrealdb
           image: {{ .Values.surrealdb.image }}
@@ -28,7 +34,11 @@ spec:
             - $(DB_USER)
             - --pass
             - $(DB_PASS)
+            {{- if .Values.surrealdb.tikvEndpoint }}
+            - tikv://{{ .Values.surrealdb.tikvEndpoint }}
+            {{- else }}
             - file:/data/nucel.db
+            {{- end }}
           env:
             - name: DB_USER
               valueFrom:
@@ -43,21 +53,26 @@ spec:
           ports:
             - containerPort: 8000
               name: ws
+          {{- if not .Values.surrealdb.tikvEndpoint }}
           volumeMounts:
             - name: data
               mountPath: /data
+          {{- end }}
           readinessProbe:
-            exec:
-              command: ["surreal", "isready", "--conn", "http://localhost:8000"]
+            httpGet:
+              path: /health
+              port: 8000
             initialDelaySeconds: 5
             periodSeconds: 5
           livenessProbe:
-            exec:
-              command: ["surreal", "isready", "--conn", "http://localhost:8000"]
-            initialDelaySeconds: 15
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
             periodSeconds: 30
           resources:
             {{- toYaml .Values.surrealdb.resources | nindent 12 }}
+  {{- if not .Values.surrealdb.tikvEndpoint }}
   volumeClaimTemplates:
     - metadata:
         name: data
@@ -69,6 +84,7 @@ spec:
         resources:
           requests:
             storage: {{ .Values.surrealdb.storage }}
+  {{- end }}
 ---
 apiVersion: v1
 kind: Service

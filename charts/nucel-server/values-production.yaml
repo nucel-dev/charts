@@ -1,0 +1,63 @@
+# Production overlay — apply on top of values.yaml with:
+#
+#   helm upgrade nucel-server charts/nucel-server \
+#     -f charts/nucel-server/values.yaml \
+#     -f charts/nucel-server/values-production.yaml \
+#     --set secrets.oidcPrivateKey="$(cat /run/secrets/oidc_key)" \
+#     --set secrets.metricsToken="$(cat /run/secrets/metrics_token)"
+#
+# REQUIRED: set secrets.requireProductionValues=true so required() gates enforce
+# that oidcPrivateKey and metricsToken are present before the chart deploys.
+
+secrets:
+  requireProductionValues: true
+
+# HPA: scale server replicas 2-10 at 70% CPU / 80% memory.
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# PDB: tolerate a single unavailable replica during rolling updates.
+podDisruptionBudget:
+  enabled: true
+
+# Schema migration runs as a pre-upgrade hook Job; server pods skip the
+# inline schema apply on startup (prevents races during rolling restarts).
+migrations:
+  enabled: true
+
+# Pull secrets from AWS Secrets Manager via external-secrets-operator.
+externalSecrets:
+  enabled: true
+  # refreshInterval controls how often ESO polls the backend store.
+  refreshInterval: 1h
+  secretStoreRef:
+    name: aws-secrets-manager
+    kind: ClusterSecretStore
+  # Override per-key remote refs to match your Secrets Manager path convention.
+  # Example: oidcPrivateKey lives at `nucel/prod/oidc-private-key`.
+  remoteRefs:
+    oidcPrivateKey: nucel/prod/oidc-private-key
+    metricsToken: nucel/prod/metrics-token
+  # Set create: false so the chart's secret template doesn't compete with ESO.
+  create: false
+
+surrealdb:
+  deploy: false  # managed by modules/surrealdb Terraform; chart does NOT create it
+
+# Enable Prometheus alerting rules (requires kube-prometheus-stack in cluster).
+prometheus:
+  alerts:
+    enabled: true
+    # Paste labels matching your Alertmanager routing rules here.
+    labels:
+      team: platform
+    # Production thresholds — lower than defaults to catch problems early.
+    pendingDepthThreshold: 500
+    claimLatencyP99: 1.0
+    fatalRate: 0.5
+  serviceMonitor:
+    enabled: true

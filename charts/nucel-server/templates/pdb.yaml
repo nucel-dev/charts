@@ -1,0 +1,27 @@
+{{- if and .Values.podDisruptionBudget .Values.podDisruptionBudget.enabled }}
+# Fix H2 — PodDisruptionBudget for the main nucel-server Deployment.
+#
+# Keeps at least `minAvailable` server pod up during voluntary
+# disruptions (node drain, cluster upgrade, Karpenter consolidation).
+# WARNING: with `server.replicas: 1` (chart default) and
+# `minAvailable: 1` the PDB will block node drains entirely. Pair this
+# with `server.replicas >= 2` OR `autoscaling.enabled: true` (which
+# defaults to `minReplicas: 2`).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: nucel-server
+  namespace: {{ include "nucel.namespace" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  {{- else }}
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable | default 1 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "nucel.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: server
+{{- end }}

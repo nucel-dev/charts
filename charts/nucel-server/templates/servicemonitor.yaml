@@ -1,0 +1,70 @@
+{{- if and .Values.prometheus .Values.prometheus.serviceMonitor .Values.prometheus.serviceMonitor.enabled }}
+# ServiceMonitor for the nucel-server `/metrics` endpoint (Fix H4).
+#
+# Without this resource Prometheus has no way to auto-discover the
+# server's metrics — even with `prometheus-rules.yaml` enabled, the
+# rules would evaluate against an empty time-series. The selector
+# matches the `service.yaml` Service and points at the `http` port
+# (server.port, default 17321), which is where the Axum server mounts
+# `/metrics` alongside the rest of the API.
+#
+# Auth: when `secrets.metricsToken` is set, Prometheus must send
+# `Authorization: Bearer <token>`. The token lives in the existing
+# `nucel-secrets` Secret under key `NUCEL_METRICS_TOKEN` (see
+# templates/secret.yaml); we reference it directly so rotating the
+# token only requires re-rendering, not a ServiceMonitor edit.
+# When the token is empty, the scrape is anonymous (matching the
+# server's behaviour as documented in values.yaml).
+#
+# Requires the Prometheus Operator (kube-prometheus-stack ships it).
+# Without the Operator the `monitoring.coreos.com/v1` CRD doesn't
+# exist and `helm install` will reject the manifest — that's why this
+# is gated behind `prometheus.serviceMonitor.enabled` rather than
+# always-on. The operator-side ServiceMonitor lives in the operator
+# repo's own manifests (different release lifecycle); see
+# PRODUCTION_HARDENING.md.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: nucel-server
+  namespace: {{ include "nucel.namespace" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+    {{- with .Values.prometheus.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "nucel.selectorLabels" . | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ include "nucel.namespace" . }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.prometheus.serviceMonitor.interval | default "30s" }}
+      scrapeTimeout: {{ .Values.prometheus.serviceMonitor.scrapeTimeout | default "10s" }}
+      scheme: http
+      {{- if .Values.secrets.metricsToken }}
+      # Bearer-token auth — the server requires
+      # `Authorization: Bearer <NUCEL_METRICS_TOKEN>` when the token is
+      # configured. Pull from the chart's own Secret so this stays in
+      # lockstep with the deployment.
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ include "nucel.secretName" . }}
+          key: NUCEL_METRICS_TOKEN
+      {{- end }}
+      # Honour any drop_/keep_ relabel rules the operator's
+      # additional-scrape-config layer wants to apply.
+      {{- with .Values.prometheus.serviceMonitor.relabelings }}
+      relabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.prometheus.serviceMonitor.metricRelabelings }}
+      metricRelabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

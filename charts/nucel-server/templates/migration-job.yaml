@@ -1,0 +1,69 @@
+{{- if and .Values.migrations .Values.migrations.enabled }}
+# Fix M5 — schema migration pre-upgrade Hook Job.
+#
+# Runs the server binary once with `NUCEL_MIGRATE_ONLY=1` (see
+# crates/nucel-server/src/main.rs) which calls `apply_schema` and exits 0
+# BEFORE any server pod starts. This serialises schema application so the
+# rolling-restart race (multiple pods racing CREATE/DEFINE on SCHEMAFULL
+# tables) can't happen.
+#
+# Server pods get `NUCEL_SKIP_SCHEMA=1` wired in deployment.yaml so they
+# don't re-apply on startup. Both env vars default off — if someone
+# disables this Job, the server still applies schema at boot
+# (backward-compatible fallback).
+#
+# Hook semantics:
+#   pre-install,pre-upgrade   → runs before every install/upgrade
+#   hook-weight: "0"          → first thing in the hook chain
+#   delete-policy:
+#     before-hook-creation    → previous run (if any) deleted on next upgrade
+#     hook-succeeded          → success cleans up; failures persist so the
+#                               Job log is available via `kubectl logs`
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "nucel.fullname" . }}-migrate
+  namespace: {{ include "nucel.namespace" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migrations.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "nucel.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "nucel.serviceAccountName" . }}
+      containers:
+        - name: migrate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Same binary as the server, gated by NUCEL_MIGRATE_ONLY=1.
+          command: ["/usr/local/bin/nucel-server"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "nucel.configMapName" . }}
+          env:
+            - name: NUCEL_MIGRATE_ONLY
+              value: "1"
+            - name: NUCEL_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" . }}
+                  key: NUCEL_DB_USER
+            - name: NUCEL_DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" . }}
+                  key: NUCEL_DB_PASS
+          resources:
+            {{- toYaml .Values.migrations.resources | nindent 12 }}
+{{- end }}

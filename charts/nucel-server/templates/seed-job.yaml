@@ -1,0 +1,179 @@
+{{- if and .Values.seed .Values.seed.enabled }}
+# Fake-data seeder Job. Runs the `nucel-seed` binary baked into the
+# same image as nucel-server. Generates realistic orgs/users/repos/
+# missions/PRs/comments/wiki/agents at the configured scale and bulk-
+# inserts via SurrealDB INSERT statements.
+#
+# Trigger:
+#   helm upgrade nucel ./charts/nucel-server \
+#     --set seed.enabled=true --set seed.scale=huge
+#
+# Re-running: when seed.mode=OnDemand the Job's name includes the
+# helm revision so `helm upgrade` always creates a fresh Job. When
+# seed.mode=Once the name is fixed; you must `kubectl delete job
+# nucel-seed -n <ns>` before re-running, OR set seed.asHook=true to
+# let helm-managed hook lifecycle handle the replacement.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  {{- if eq .Values.seed.mode "OnDemand" }}
+  name: nucel-seed-r{{ .Release.Revision }}
+  {{- else }}
+  name: nucel-seed
+  {{- end }}
+  namespace: {{ include "nucel.namespace" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+    app.kubernetes.io/component: seed
+  annotations:
+    {{- if .Values.seed.asHook }}
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    {{- end }}
+    checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+spec:
+  ttlSecondsAfterFinished: {{ .Values.seed.ttlSecondsAfterFinished }}
+  backoffLimit: {{ .Values.seed.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.seed.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "nucel.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: seed
+        {{- with .Values.seed.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.seed.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "nucel.serviceAccountName" . }}
+      {{- if .Values.seed.mountRepos }}
+      # Match the server's fsGroup + run an initContainer that
+      # chowns/chmods /data/repos to GID 0 with group-rwX perms
+      # before the seed writes any files. EKS Auto Mode injects an
+      # equivalent init on server pods so without this here the
+      # files seed creates carry SELinux MCS labels the server's
+      # process can't read until the next server pod restart.
+      securityContext:
+        fsGroup: 0
+        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        - name: fix-data-perms
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - "chown -R 0:0 /data/repos && chmod -R u+rwX,g+rwX /data/repos && ls -la /data/repos | head -3"
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: repos
+              mountPath: /data/repos
+      {{- end }}
+      {{- with .Values.seed.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.seed.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.seed.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if or .Values.seed.affinity .Values.seed.mountRepos }}
+      affinity:
+        {{- with .Values.seed.affinity }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if .Values.seed.mountRepos }}
+        # When mounting the repos PVC (RWO), the seed pod must land
+        # on the same node as a server pod. Hard requirement, not
+        # preferred — otherwise volume attach fails with Multi-Attach.
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app.kubernetes.io/component
+                    operator: In
+                    values: ["server"]
+                  - key: app.kubernetes.io/instance
+                    operator: In
+                    values: [{{ .Release.Name | quote }}]
+              topologyKey: kubernetes.io/hostname
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: seed
+          image: "{{ .Values.seed.image.repository | default .Values.image.repository }}:{{ .Values.seed.image.tag | default .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.seed.image.pullPolicy | default .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/nucel-seed"]
+          args:
+            - "--mode={{ .Values.seed.runMode | default "seed" }}"
+            - "--scale={{ .Values.seed.scale }}"
+          envFrom:
+            - configMapRef:
+                name: {{ include "nucel.configMapName" . }}
+          env:
+            - name: NUCEL_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" . }}
+                  key: NUCEL_DB_USER
+            - name: NUCEL_DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" . }}
+                  key: NUCEL_DB_PASS
+            # Per-table row-count overrides. Only emitted when set —
+            # absent env vars fall through to the scale preset's
+            # values inside the binary.
+            {{- with .Values.seed.overrides.users }}
+            - { name: NUCEL_SEED_USERS, value: "{{ . }}" }
+            {{- end }}
+            {{- with .Values.seed.overrides.orgs }}
+            - { name: NUCEL_SEED_ORGS, value: "{{ . }}" }
+            {{- end }}
+            {{- with .Values.seed.overrides.reposPerOrg }}
+            - { name: NUCEL_SEED_REPOS_PER_ORG, value: "{{ . }}" }
+            {{- end }}
+            {{- with .Values.seed.overrides.missionsPerRepo }}
+            - { name: NUCEL_SEED_MISSIONS_PER_REPO, value: "{{ . }}" }
+            {{- end }}
+            {{- with .Values.seed.overrides.pullsPerRepo }}
+            - { name: NUCEL_SEED_PULLS_PER_REPO, value: "{{ . }}" }
+            {{- end }}
+            {{- with .Values.seed.overrides.commentsPerMission }}
+            - { name: NUCEL_SEED_COMMENTS_PER_MISSION, value: "{{ . }}" }
+            {{- end }}
+            {{- with .Values.seed.overrides.commentsPerPull }}
+            - { name: NUCEL_SEED_COMMENTS_PER_PULL, value: "{{ . }}" }
+            {{- end }}
+            {{- with .Values.seed.overrides.wikiPerRepo }}
+            - { name: NUCEL_SEED_WIKI_PER_REPO, value: "{{ . }}" }
+            {{- end }}
+            {{- with .Values.seed.overrides.agentsPerOrg }}
+            - { name: NUCEL_SEED_AGENTS_PER_ORG, value: "{{ . }}" }
+            {{- end }}
+            {{- with .Values.seed.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if .Values.seed.mountRepos }}
+          volumeMounts:
+            - name: repos
+              mountPath: /data/repos
+          {{- end }}
+          resources:
+            {{- toYaml .Values.seed.resources | nindent 12 }}
+      {{- if .Values.seed.mountRepos }}
+      volumes:
+        - name: repos
+          persistentVolumeClaim:
+            claimName: nucel-repos
+      {{- end }}
+{{- end }}

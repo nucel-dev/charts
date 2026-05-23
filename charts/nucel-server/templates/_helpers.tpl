@@ -62,5 +62,9 @@ ConfigMap name.
 ServiceAccount name.
 */}}
 {{- define "nucel.serviceAccountName" -}}
-{{- include "nucel.fullname" . }}
+{{- if and .Values.serviceAccount .Values.serviceAccount.name -}}
+{{- .Values.serviceAccount.name -}}
+{{- else -}}
+{{- include "nucel.fullname" . -}}
+{{- end -}}
 {{- end }}

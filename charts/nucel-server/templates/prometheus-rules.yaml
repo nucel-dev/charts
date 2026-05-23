@@ -1,0 +1,91 @@
+{{- if and .Values.prometheus .Values.prometheus.alerts .Values.prometheus.alerts.enabled }}
+# PrometheusRule with the queue/runner alerts. Requires a
+# Prometheus operator in the cluster (the kube-prometheus-stack
+# chart). Drops in alongside the existing servicemonitor (if any).
+#
+# Defaults are sized for a low-volume install — bump
+# pendingDepthThreshold + claimLatencyP99 in values.yaml when you
+# scale up worker pods past the noise floor.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: nucel-bg-job
+  namespace: {{ include "nucel.namespace" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+    {{- with .Values.prometheus.alerts.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: nucel-bg-job
+      interval: 30s
+      rules:
+        # Pending depth growing unchecked for >5min — workers stuck or
+        # producer outpacing consumers. Per-kind so a webhook storm
+        # doesn't drown a slow PR-diff alert.
+        - alert: NucelBgJobPendingDepthHigh
+          expr: |
+            max by (kind) (nucel_bg_job_depth{status="pending"})
+              > {{ .Values.prometheus.alerts.pendingDepthThreshold }}
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "bg_job pending depth high for kind {{`{{`}} $labels.kind {{`}}`}}"
+            description: |
+              The {{`{{`}} $labels.kind {{`}}`}} queue has more than
+              {{ .Values.prometheus.alerts.pendingDepthThreshold }} pending rows
+              for >5min. Either scale up that pool or investigate stuck handlers.
+
+        # Anything in DLQ is operator-actionable. Single fired alert
+        # per kind; check the admin endpoint for details.
+        - alert: NucelBgJobDlqNonEmpty
+          expr: |
+            max by (kind) (nucel_bg_job_depth{status="failed"}) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: "bg_job DLQ non-empty for kind {{`{{`}} $labels.kind {{`}}`}}"
+            description: |
+              Jobs of kind {{`{{`}} $labels.kind {{`}}`}} have exhausted retries.
+              Inspect via GET /api/v1/admin/jobs/dlq?kind={{`{{`}} $labels.kind {{`}}`}}
+              and decide whether to requeue or discard.
+
+        # Claim latency p99 indicates DB pressure. Crossing the threshold
+        # for sustained periods means the SurrealDB cluster needs more
+        # capacity (TiKV nodes, more PD).
+        - alert: NucelBgJobClaimLatencyP99High
+          expr: |
+            histogram_quantile(
+              0.99,
+              sum by (le) (rate(nucel_bg_job_claim_latency_seconds_bucket[5m]))
+            ) > {{ .Values.prometheus.alerts.claimLatencyP99 }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "bg_job claim p99 latency above {{ .Values.prometheus.alerts.claimLatencyP99 }}s"
+            description: |
+              99th percentile claim_batch_sharded latency has been above
+              {{ .Values.prometheus.alerts.claimLatencyP99 }}s for >10min. The
+              SurrealDB cluster is the likely bottleneck — check db CPU, indexes,
+              or scale TiKV nodes.
+
+        # Spike in fatal/panic dispatch outcomes — surfaces a bad deploy
+        # or a runtime panic that's reproducible.
+        - alert: NucelBgJobFatalRateHigh
+          expr: |
+            sum by (kind) (rate(nucel_bg_job_dispatch_total{outcome=~"fatal|panic"}[5m]))
+              > {{ .Values.prometheus.alerts.fatalRate }}
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "bg_job fatal dispatch rate elevated for kind {{`{{`}} $labels.kind {{`}}`}}"
+            description: |
+              {{`{{`}} $labels.kind {{`}}`}} is fatally failing at
+              >{{ .Values.prometheus.alerts.fatalRate }}/sec — a recent deploy
+              or a panicking handler. Check the worker pod logs.
+{{- end }}

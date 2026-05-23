@@ -1,0 +1,112 @@
+{{- if and .Values.worker .Values.worker.enabled }}
+# Standalone JobRunner Deployment.
+#
+# Runs the same `nucel-worker` binary that ships in the same image as
+# nucel-server. Consumes the `bg_job` table; safe to run alongside
+# nucel-server replicas thanks to the atomic claim — no leader election.
+#
+# Volumes mirror the server's because some handlers (e.g.
+# rebuild_pr_diff_cache) need read access to /data/repos to compute
+# diffs. Workspace + ci-data are intentionally NOT mounted here — the
+# worker doesn't run CI; that stays on the server's WorkerLoop.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nucel-worker
+  namespace: {{ include "nucel.namespace" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+  annotations:
+    checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  selector:
+    matchLabels:
+      {{- include "nucel.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        {{- include "nucel.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+    spec:
+      serviceAccountName: {{ include "nucel.serviceAccountName" . }}
+      containers:
+        - name: worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/nucel-worker"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "nucel.configMapName" . }}
+          env:
+            - name: NUCEL_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" . }}
+                  key: NUCEL_DB_USER
+            - name: NUCEL_DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" . }}
+                  key: NUCEL_DB_PASS
+            - name: NUCEL_HOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" . }}
+                  key: NUCEL_HOOK_SECRET
+            {{- if .Values.secrets.oidcPrivateKey }}
+            - name: NUCEL_OIDC_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" . }}
+                  key: NUCEL_OIDC_PRIVATE_KEY
+            {{- end }}
+            # Stable per-pod worker id so claim_by points at a useful
+            # name in the queue depth dump. The atomic claim doesn't
+            # depend on uniqueness — this is just observability.
+            - name: NUCEL_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- with .Values.worker.batchSize }}
+            - name: NUCEL_JOB_BATCH
+              value: "{{ . }}"
+            {{- end }}
+            {{- with .Values.worker.pollMs }}
+            - name: NUCEL_JOB_POLL_MS
+              value: "{{ . }}"
+            {{- end }}
+            {{- with .Values.worker.leaseSeconds }}
+            - name: NUCEL_JOB_LEASE_SECS
+              value: "{{ . }}"
+            {{- end }}
+          volumeMounts:
+            - name: repos
+              mountPath: /data/repos
+              readOnly: true
+            - name: registry
+              mountPath: /data/registry
+              readOnly: true
+            - name: npm
+              mountPath: /data/npm
+              readOnly: true
+          # No HTTP probes — the worker has no listener. A liveness
+          # probe via `pgrep nucel-worker` could be added later if K8s
+          # needs to detect a stuck JobRunner; for now we rely on the
+          # claim lease to release stuck rows.
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+      volumes:
+        - name: repos
+          persistentVolumeClaim:
+            claimName: nucel-repos
+        - name: registry
+          persistentVolumeClaim:
+            claimName: nucel-registry
+        - name: npm
+          persistentVolumeClaim:
+            claimName: nucel-npm
+{{- end }}

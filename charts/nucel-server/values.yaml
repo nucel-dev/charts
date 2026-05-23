@@ -1,7 +1,13 @@
 # -- nucel-server image
+#
+# Fix M1: `tag` defaults to empty so the chart falls back to
+# `Chart.AppVersion` (pinned per release in Chart.yaml). Operators who
+# previously relied on a moving `:latest` tag must now set
+# `--set image.tag=latest` explicitly — picking up un-pinned images was
+# the original failure mode this guards against.
 image:
   repository: ghcr.io/nucel-dev/nucel-server
-  tag: latest
+  tag: ""
   pullPolicy: IfNotPresent
 
 # -- Server deployment
@@ -17,18 +23,123 @@ server:
       cpu: 1000m
       memory: 1Gi
 
+# -- Worker deployment (standalone JobRunner).
+#
+# Disabled by default — the in-process runner inside nucel-server keeps
+# the queue moving for low-volume installs. Enable + bump replicas when
+# bg_job depth (Prometheus: nucel_bg_job_depth) starts growing during
+# traffic spikes. The same `bg_job` table is consumed by both — the
+# atomic claim guarantees no row is processed twice.
+#
+# PVC NOTE: the chart's PVCs are ReadWriteOnce. The worker mounts
+# /data/repos read-only for the rebuild_pr_diff_cache handler, which
+# means the worker pod must land on the same node as the server pod
+# unless you switch storage.storageClassName to a ReadWriteMany class
+# (e.g. NFS, CephFS, Longhorn-RWX). For single-node Hetzner clusters
+# this is a non-issue.
+worker:
+  enabled: false
+  replicas: 1
+  # Independent batch/poll knobs in case the worker pool wants to be
+  # more aggressive than the in-server runner. Empty = inherit defaults
+  # from the binary.
+  batchSize: ""
+  pollMs: ""
+  leaseSeconds: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # Per-kind worker pools. Each entry becomes its own Deployment
+  # (`nucel-worker-<name>`). Pinning specific job kinds to dedicated
+  # pools means a webhook storm on `deliver_app_webhook` can't starve
+  # latency-sensitive `rebuild_pr_diff_cache` work running elsewhere.
+  #
+  # Optional shardIndex/shardCount adds hash partitioning across pods
+  # within a pool — only rows with bg_job.shard_key % shardCount ==
+  # shardIndex are claimed by this pool. Useful when scaling a single
+  # high-volume kind to many replicas.
+  #
+  # Example:
+  #   pools:
+  #     - name: webhooks
+  #       replicas: 3
+  #       kinds: ["deliver_app_webhook", "deliver_repo_webhook"]
+  #       batchSize: 16
+  #       pollMs: 250
+  #     - name: pr-diffs
+  #       replicas: 1
+  #       kinds: ["rebuild_pr_diff_cache"]
+  #       resources:
+  #         requests: { cpu: 500m, memory: 512Mi }
+  #         limits: { cpu: 2000m, memory: 2Gi }
+  pools: []
+
+# -- Schema migrations (Fix M5).
+#
+# When enabled, the chart renders a pre-install / pre-upgrade Helm Hook
+# Job that runs the server binary with `NUCEL_MIGRATE_ONLY=1` — it
+# applies the SurrealDB SCHEMAFULL schema exactly once and exits 0.
+# Server pods then start with `NUCEL_SKIP_SCHEMA=1` so they don't
+# re-apply on boot.
+#
+# Before this fix every server pod called `apply_schema` at startup,
+# which races during rolling restarts: pod A and pod B both racing to
+# CREATE/DEFINE the same SCHEMAFULL tables produces "table already
+# exists" errors and occasional partially-applied schemas.
+#
+# Default `true` — disable only for local dev with a single replica
+# where the race window doesn't matter, or when applying schema out of
+# band.
+migrations:
+  enabled: true
+  # Hook lifecycle:
+  #   hook-weight: 0           → runs before everything else
+  #   delete-policy:
+  #     before-hook-creation   → previous Job (if any) deleted before re-run
+  #     hook-succeeded         → success cleans up automatically; failures
+  #                              persist for `kubectl logs job/...` debugging
+  backoffLimit: 2
+  # Hard ceiling on migration runtime (seconds). 600s = 10min headroom;
+  # actual apply_schema runs in <30s on a warm cluster.
+  activeDeadlineSeconds: 600
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
 # -- Domain and OIDC
 domain: nucel.dev
 oidc:
   issuer: "https://nucel.dev"
 
-# -- SurrealDB. Set deploy=false when running an external SurrealDB
-# (e.g. multi-replica HA against a TiKV cluster managed outside this chart).
-# nucel-server still expects a Service named "surrealdb" on port 8000 in
-# the same namespace — provide one externally when deploy=false.
+# -- Session cookies
+cookies:
+  # Secure flag — required over HTTPS, breaks login over plain HTTP.
+  # Set to "1" in any TLS-fronted environment (default), "0" only for
+  # local-dev plaintext.
+  secure: "1"
+
+# -- SurrealDB
 surrealdb:
-  deploy: true
-  image: surrealdb/surrealdb:v2.6
+  # Set to true only when you want the Helm chart to deploy SurrealDB itself.
+  # In production the infra Terraform module (modules/surrealdb) manages the
+  # StatefulSet directly; keep this false so the chart does not create a
+  # competing resource.
+  deploy: false
+  image: surrealdb/surrealdb:v3.0.5
+  # tikvEndpoint: when non-empty, SurrealDB starts in TiKV mode using this
+  # PD address (e.g. "pd-pd.tikv-system.svc.cluster.local:2379"). The
+  # volumeClaimTemplates block is omitted in TiKV mode — data lives in the
+  # TiKV cluster, not a local PVC.
+  tikvEndpoint: ""
   storage: 20Gi
   resources:
     requests:
@@ -39,29 +150,299 @@ surrealdb:
       memory: 1Gi
 
 # -- Persistent storage sizes
+#
+# storageClassName: empty falls back to the cluster default StorageClass.
+# On EKS Auto Mode the default is `gp2` (older AMI) or unset — recommended
+# override is `gp3` (better IOPS / throughput / cost) plus
+# `volumeBindingMode: WaitForFirstConsumer` on the StorageClass for
+# correct multi-AZ scheduling (the volume is provisioned in whichever AZ
+# the pod is scheduled on, not eagerly in some random AZ). See
+# PRODUCTION_HARDENING.md → "Storage class (EKS)" for the recommended
+# StorageClass manifest. Leaving the default empty so the chart still
+# renders on non-EKS clusters (Hetzner, k3s, etc.).
 storage:
   repos: 50Gi
   ciData: 50Gi
   registry: 20Gi
   npm: 10Gi
+  # Recommended for EKS: "gp3" (with a StorageClass that sets
+  # volumeBindingMode: WaitForFirstConsumer for multi-AZ correctness).
   storageClassName: ""
 
+# -- Repo storage backend (T1-9). `local` keeps every git repo on
+# the PVC at /data/repos — fine for ~10k repos. `s3` enables a cold
+# tier on object storage so idle repos can be archived off the
+# SSD. The local PVC stays as the hot cache; ensure_local() faults
+# repos back in on access.
+#
+# Hetzner: use Object Storage (S3-compatible). MinIO works locally.
+repoStorage:
+  kind: local
+  s3:
+    bucket: ""
+    prefix: "repos/"
+    region: "eu-central-1"
+    # Override only when using a non-AWS S3 backend (Hetzner Object
+    # Storage, Cloudflare R2, MinIO).
+    endpoint: ""
+    # Static credentials. Prefer leaving these empty and using IRSA
+    # (AWS) / a workload identity binding (GCP) / a mounted
+    # service account (Hetzner) so credentials don't sit in env.
+    accessKeyId: ""
+    secretAccessKey: ""
+
 # -- Ingress
+#
+# Controller-agnostic: drive className + annotations from values so the
+# same chart renders correctly for AWS Load Balancer Controller (ALB),
+# ingress-nginx + cert-manager, or any other ingress class.
+#
+# `tls` accepts either:
+#   true              → templated to one entry { hosts: [domain],
+#                       secretName: <release>-nucel-server-tls } (or the
+#                       value of .Values.ingress.tlsSecretName if set)
+#   false             → no tls block
+#   [ ... ]           → raw list passed through verbatim (multi-host SNI)
 ingress:
   enabled: false
   className: ""
   annotations: {}
-  # cert-manager.io/cluster-issuer: letsencrypt-prod
   tls: true
+  tlsSecretName: ""
+  # --- AWS Load Balancer Controller (ALB) — EKS ---
+  # className: alb
+  # annotations:
+  #   alb.ingress.kubernetes.io/scheme: internet-facing
+  #   alb.ingress.kubernetes.io/target-type: ip
+  #   alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+  #   alb.ingress.kubernetes.io/ssl-redirect: '443'
+  #   alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:region:account:certificate/uuid
+  #   alb.ingress.kubernetes.io/healthcheck-path: /healthz
+  # tls: false  # ALB terminates via ACM, no in-cluster TLS secret
+  #
+  # --- ingress-nginx + cert-manager ---
+  # className: nginx
+  # annotations:
+  #   nginx.ingress.kubernetes.io/proxy-body-size: 100m
+  #   nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+  #   cert-manager.io/cluster-issuer: letsencrypt-prod
+  # tls: true
 
-# -- Secrets (set create: false to manage externally)
+# -- ServiceAccount
+#
+# `create: true` provisions a SA named after the release; set `name` to
+# bind to an externally-managed SA instead. `annotations` is the IRSA
+# (IAM Roles for Service Accounts) wiring point on EKS: stamping
+# `eks.amazonaws.com/role-arn` here lets the server's S3 repo backend
+# authenticate via the pod's projected service-account token instead of
+# the static `repoStorage.s3.accessKeyId` / `secretAccessKey` pair —
+# preferred for any production EKS deployment.
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  # --- IRSA (IAM Roles for Service Accounts) — EKS ---
+  # annotations:
+  #   eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT:role/nucel-server-irsa-role
+  #
+  # --- GKE Workload Identity ---
+  # annotations:
+  #   iam.gke.io/gcp-service-account: nucel-server@PROJECT.iam.gserviceaccount.com
+
+# -- Secrets (set create: false to manage externally — e.g. when
+# externalSecrets.enabled=true and an ExternalSecret CRD writes the
+# Secret object instead).
 secrets:
   create: true
+  # When true, fail `helm install/upgrade` if any of the secrets that
+  # MUST be set in production are empty. Currently enforces:
+  #   - oidcPrivateKey  (Fix C8 — auth across pod restarts)
+  # The SSH host key (Fix C9) and the metrics token (Fix H9) are gated
+  # by their own flags below so each can be relaxed independently for
+  # local dev / single-replica overlays.
+  requireProductionValues: true
   dbUser: root
   dbPass: ""
   ciRunnerToken: ""
   hookSecret: ""
+  # Ed25519 private key (PKCS#8 PEM) used to sign OIDC ID tokens. When
+  # unset, each pod boots with an ephemeral key and tokens issued by
+  # one pod are rejected by every other pod / by the same pod after a
+  # restart. Generate once with:
+  #   openssl genpkey -algorithm ED25519
+  #
+  # Fix C8: enforced via the Helm `required` template function when
+  # `secrets.create: true` AND `secrets.requireProductionValues: true`.
+  # Set `requireProductionValues: false` to relax for local dev /
+  # ephemeral preview environments.
   oidcPrivateKey: ""
+  # Ed25519 private key (OpenSSH format) used as the SSH server's host
+  # key. When unset, each pod boots with an ephemeral host key and
+  # `~/.ssh/known_hosts`-pinned clients see a MITM warning on every
+  # restart. Generate once with:
+  #   ssh-keygen -t ed25519 -N "" -f nucel-ssh-host -C "nucel-ssh-host"
+  #   cat nucel-ssh-host    # PEM private key — paste into this field
+  #
+  # Fix C9: when set, the chart mounts the key into the server pod at
+  # /etc/nucel/ssh-host-key and points `NUCEL_SSH_HOST_KEY_PATH` at it
+  # (the server already reads the host key from a file via that env
+  # var — see crates/nucel-server/src/ssh/mod.rs::load_or_generate_host_key).
+  sshHostKey: ""
+  # Bearer token Prometheus must send as `Authorization: Bearer <token>`
+  # to scrape /metrics. When unset the endpoint serves anonymously
+  # (typical for local dev). In any environment where /metrics is
+  # reachable from outside the cluster this MUST be set.
+  #
+  # Fix H9: enforced via `required` when `prometheus.requireAuth: true`
+  # (default). The /metrics endpoint shares its listener with the rest
+  # of the application — anything reachable on the ingress reaches
+  # /metrics too unless this is set.
+  metricsToken: ""
+  # OpenRouter API key for the agent-workflow threat scanner (Wave 4).
+  # Without this set, the scanner runs in offline-mode (always returns
+  # `pass`). Production deployments MUST set this so workflow output
+  # actually gets scanned for prompt-injection / leaked-secrets /
+  # malicious-code before being applied.
+  openrouterKey: ""
+  # Bot account credentials for agent-workflow PAT minting (NUCEL_GIT_USER /
+  # NUCEL_GIT_PASSWORD). The server signs in as this user and mints a fresh
+  # per-run scoped PAT for each AW dispatch. Without these set,
+  # mint_scoped_pat returns None and AW K8s dispatch is skipped.
+  # The bot user must exist in the database with a valid account.
+  gitBotUser: ""
+  gitBotPassword: ""
+  # Anthropic API key for agent-workflow runner pods (claude-code SDK).
+  # When set, the chart also mirrors this into a second Secret
+  # `nucel-aw-anthropic` in `.Values.ciNamespace` (defaults to `nucel-ci`)
+  # so runner Jobs spawned by `aw_k8s_dispatch` can mount it via
+  # `secretKeyRef` (see `agentWorkflows.k8s.anthropicSecret`). Without it,
+  # AW runner pods boot without ANTHROPIC_API_KEY and the agent SDK calls
+  # fail at runtime.
+  #
+  # In production, prefer wiring this through `externalSecrets` so the key
+  # is pulled from AWS Secrets Manager / Vault — leaving it in chart
+  # values risks accidental commit.
+  #
+  # WARNING: do NOT commit a real key into values.yaml. Use --set / overlay
+  # files / ExternalSecrets.
+  anthropicApiKey: ""
+
+# -- External Secrets Operator (https://external-secrets.io) integration.
+#
+# When `externalSecrets.enabled: true` the chart renders an
+# `ExternalSecret` CRD that pulls the chart's Secret object from a remote
+# secrets backend (AWS Secrets Manager, GCP Secret Manager, Vault, …)
+# instead of materialising it from chart values. Set
+# `secrets.create: false` at the same time so the chart-managed Secret
+# template is skipped — otherwise both will fight to own the same
+# `metadata.name`.
+#
+# Disabled by default; the chart still renders on clusters that don't
+# run the External Secrets Operator (the external-secrets.io CRD
+# wouldn't exist there and `helm install` would reject the manifest).
+#
+# Typical EKS overlay:
+#   externalSecrets:
+#     enabled: true
+#     secretStoreRef:
+#       name: aws-secrets-manager
+#       kind: ClusterSecretStore
+#     remoteRef:
+#       key: nucel/prod/server
+#   secrets:
+#     create: false
+externalSecrets:
+  enabled: false
+  refreshInterval: 1h
+  secretStoreRef:
+    name: ""
+    # ClusterSecretStore (cluster-scoped) or SecretStore (namespace-scoped).
+    kind: ClusterSecretStore
+  remoteRef:
+    # The single remote key whose JSON payload contains every
+    # NUCEL_* the chart expects in the Secret (NUCEL_DB_PASS,
+    # NUCEL_OIDC_PRIVATE_KEY, NUCEL_SSH_HOST_KEY, NUCEL_METRICS_TOKEN,
+    # NUCEL_HOOK_SECRET, NUCEL_CI_RUNNER_TOKEN, NUCEL_OPENROUTER_KEY, …).
+    key: ""
+
+# -- Agent-workflow scheduler tick (Wave 7b/7c) cadence in seconds.
+# The in-process scheduler enqueues an aw_tick job every N seconds;
+# the handler walks autoloop + cron-scheduled workflows and dispatches
+# matched runs. Default 300 (5 min) — suitable for cron expressions
+# down to */5 minute granularity. Lower it if you have * * * * *
+# expressions and need them to fire promptly.
+agentWorkflows:
+  # K8s dispatch (NUCEL_AW_K8S_URL must be set to enable AW runner pods).
+  # In production the pod uses its mounted ServiceAccount token for K8s
+  # auth so NUCEL_AW_K8S_TOKEN is not required here — the chart omits it
+  # and aw_k8s_dispatch.rs reads the in-cluster token file automatically.
+  #
+  # Set k8s.url = "https://kubernetes.default.svc" to enable in-cluster
+  # AW dispatch. Leave blank to disable (dev mode / no runner pods).
+  k8s:
+    url: ""
+    # namespace: K8s namespace where AW runner Jobs + per-run Secrets are
+    # created. Must match the namespace that holds nucel-aw-anthropic Secret.
+    namespace: "nucel-ci"
+    # apiUrl: the base URL the runner pod uses to call back to nucel-server.
+    # Defaults to the in-cluster service address; override when the server
+    # is not reachable via the default cluster-local DNS name.
+    apiUrl: ""
+    # runnerImage: OCI image reference for the nucel-aw-runner binary.
+    # Required when k8s.url is set; leave empty to disable runner pod creation.
+    runnerImage: ""
+    # anthropicSecret: name of the K8s Secret in k8s.namespace that holds
+    # ANTHROPIC_API_KEY. Injected into the runner pod via secretKeyRef
+    # with optional:true. Defaults to "nucel-aw-anthropic".
+    anthropicSecret: "nucel-aw-anthropic"
+  tickPeriodSeconds: 300
+  # Wave M: per-workflow manual-trigger cap (per minute). Drain
+  # protection against a misbehaving operator hammering the
+  # "Trigger now" button. Counts nucel_workflow_run rows with
+  # trigger_type='manual' for THIS workflow over the last 60s.
+  # Hitting the cap returns 429 with retry_after_seconds=60.
+  manualTriggerPerMin: 5
+  # Wave M2: org-wide manual-trigger cap (per minute). Counts manual
+  # runs across ALL workflows owned by the same org. Closes the
+  # loophole of spamming distinct workflows to bypass the per-workflow
+  # cap above. Default 20.
+  orgManualTriggerPerMin: 20
+  # Wave Q: org-wide daily spend ceiling (USD). When the sum of
+  # agent_session.cost_usd over the past 24h for the workflow's
+  # owning org meets-or-exceeds this cap, the run is marked
+  # 'budget_exceeded' and dispatch is skipped — runner pod never
+  # starts. 0 disables the gate (default).
+  dailyOrgUsdCap: 0
+  # Wave J: needs_review TTL (hours). aw_tick auto-rejects any run
+  # stuck in 'needs_review' longer than this. Default 168 = 7 days.
+  # Set to 0 to disable.
+  needsReviewTtlHours: 168
+  # Wave X: stuck-runner timeout (minutes). aw_tick auto-fails any
+  # run sitting in running/scanning/applying past this — covers the
+  # case where the runner pod OOMed or got evicted mid-execution and
+  # the lifecycle callback never came back. Default 60. Set to 0 to
+  # disable.
+  runStuckTimeoutMin: 60
+  # Wave AO: circuit breaker. After this many consecutive
+  # failed/blocked runs in a row, aw_tick auto-disables the
+  # workflow with an audit row so a broken workflow doesn't keep
+  # burning budget. 0 (default) disables the breaker.
+  autoDisableAfterNFails: 0
+  # Wave AY: env-controlled org-wide concurrency cap. Caps the
+  # number of in-flight runs (any non-terminal status) across ALL
+  # workflows owned by the same org. Closes the loophole where N
+  # workflows in feedback can saturate the runner pool. 0 disables
+  # (default).
+  orgMaxConcurrent: 0
+
+# -- NodePool (custom Karpenter NodePool — survives EKS Auto Mode
+# reconciliation, unlike patches to the managed general-purpose pool)
+nodePool:
+  create: true
+  name: arm64-general
+  limits:
+    cpu: "100"
+    memory: "200Gi"
 
 # -- Namespace
 namespace:
@@ -76,7 +457,211 @@ ciOperator:
   enabled: true
   runnerToken: ""
 
+# -- Fake-data seeder (`nucel-seed` binary baked into the same image
+# as nucel-server). Off by default — flip `seed.enabled: true` to
+# run it. Each helm upgrade with the flag set creates a fresh Job;
+# the `helm.sh/hook-delete-policy: before-hook-creation` annotation
+# replaces any prior run so re-running is idempotent at the K8s
+# level (the seed itself appends new fake rows on top of existing
+# data).
+#
+# Scale presets (number of fake rows generated):
+#   small   →     100 users  / ~10K rows total
+#   medium  →    5000 users  / ~500K rows  (default)
+#   large   →   50000 users  / ~5M rows
+#   huge    →  500000 users  / ~50M rows
+#
+# Run with:
+#   helm upgrade nucel ./charts/nucel-server \
+#     --set seed.enabled=true --set seed.scale=huge
+#
+# When asHook=true, the Job runs as a post-install/post-upgrade
+# hook (helm waits for completion before reporting the release as
+# ready). When false, it's a regular Job applied alongside the rest
+# of the release (helm doesn't wait — useful for huge scales that
+# would blow past the helm timeout).
+seed:
+  enabled: false
+  # Run mode for the seed Job:
+  #   seed   →  default. Drops FULLTEXT, runs the 9-step pipeline,
+  #             rebuilds FULLTEXT.
+  #   reset  →  wipes all seeded tables (DELETE leaves-first) then
+  #             rebuilds FULLTEXT against the empty tables. Use to
+  #             recover from a failed seed run that left orphan rows
+  #             + missing indexes.
+  runMode: seed
+  # When true, mount the `nucel-repos` PVC at /data/repos so step_02
+  # can create real bare git repos with seed commits. Adds a hard
+  # podAffinity rule pinning the seed pod to a node where a server
+  # replica is already running (RWO PVC requirement). Disable when
+  # the cluster doesn't run nucel-server, or when you only want DB
+  # rows without backing git data.
+  mountRepos: false
+  # Preset profile: small | medium | large | huge.
+  # Individual fields below override the preset's row counts when set.
+  scale: medium
+  # Per-table row-count overrides. Empty = use the preset's value.
+  # These map 1:1 to NUCEL_SEED_* env vars consumed by nucel-seed.
+  overrides:
+    users: ""
+    orgs: ""
+    reposPerOrg: ""
+    missionsPerRepo: ""
+    pullsPerRepo: ""
+    commentsPerMission: ""
+    commentsPerPull: ""
+    wikiPerRepo: ""
+    agentsPerOrg: ""
+  # When true the Job runs as a post-install/post-upgrade hook —
+  # helm waits for completion. False = plain Job (helm does not
+  # wait; recommended for `huge` scale which can take >10 min and
+  # would exceed the default helm --timeout).
+  asHook: false
+  # Run modes:
+  #   Once     → single Job, runs to completion, gets cleaned up
+  #              after ttlSecondsAfterFinished
+  #   OnDemand → same but the Job's name includes .Release.Revision
+  #              so each `helm upgrade` makes a fresh Job (lets you
+  #              re-seed without first deleting the prior Job)
+  mode: OnDemand
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 2
+  # Hard ceiling on Job runtime. `huge` at 50M rows on a single
+  # 4-CPU pod takes ~30-60 min depending on SurrealDB I/O — give it
+  # 2h headroom by default.
+  activeDeadlineSeconds: 7200
+  # Override the seed image when it's not the same as the server
+  # image (e.g. running the seed off a fork without redeploying).
+  # Empty = inherit from .Values.image.
+  image:
+    repository: ""
+    tag: ""
+    pullPolicy: ""
+  resources:
+    requests:
+      cpu: "1"
+      memory: "2Gi"
+    # Memory limit doubled from the original 8Gi default — even with
+    # the streaming BatchInserter the in-flight ID lookup tables (org,
+    # user, repo IDs) plus SurrealDB driver buffers can exceed 8Gi at
+    # huge scale (500K users + 100K repos + 3M missions worth of
+    # foreign-key id strings). 16Gi is comfortable headroom.
+    limits:
+      cpu: "4"
+      memory: "16Gi"
+  # Pin to arm64 by default since the cluster's general-purpose pool
+  # is arm64-only. Override for x86 clusters.
+  nodeSelector:
+    kubernetes.io/arch: arm64
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  podLabels: {}
+  priorityClassName: ""
+  # Extra raw env vars passed through to the seed container. Use
+  # for one-off knobs (e.g. RUST_LOG=debug) without rebuilding the
+  # chart.
+  extraEnv: []
+  #   - name: RUST_LOG
+  #     value: debug
+
 # -- Logging
 logging:
   level: info
   rustLog: "info,nucel_server=info,tower_http=warn"
+
+# -- Prometheus integration. Requires kube-prometheus-stack
+# (or any Prometheus operator) running in the cluster. Two
+# sub-resources, both opt-in:
+#
+#  - `alerts` ships PrometheusRule CRDs (queue depth, DLQ, latency,
+#    fatal rate). Existed before Fix H4.
+#  - `serviceMonitor` ships a ServiceMonitor CRD so Prometheus
+#    auto-discovers and scrapes the server's /metrics endpoint
+#    on the `http` port. Without this the alert rules above
+#    evaluate against an empty time-series.
+#
+# `requireAuth: true` (default) makes the chart fail-fast if
+# `secrets.metricsToken` is empty (Fix H9). The /metrics endpoint shares
+# the same Axum listener as the rest of the API, so anything reachable
+# on the ingress reaches /metrics — leaving the token empty exposes
+# bg_job kinds, dispatch counters and latency histograms to anyone who
+# can hit the ingress. Set `requireAuth: false` only in fully
+# air-gapped local-dev / preview overlays.
+prometheus:
+  requireAuth: true
+  alerts:
+    enabled: false
+    # Extra labels on the rule resource — useful when your operator
+    # routes alerts via labels (`{{ team: platform }}` etc.).
+    labels: {}
+    # Pending rows allowed per kind before alerting.
+    pendingDepthThreshold: 1000
+    # Claim p99 latency budget (seconds).
+    claimLatencyP99: 0.5
+    # Per-kind fatal/panic dispatch rate (per second) before alerting.
+    fatalRate: 1
+
+  # ServiceMonitor for Prometheus Operator-based discovery of the
+  # server's /metrics endpoint (Fix H4). Off by default so the chart
+  # still renders on clusters that DON'T run the Prometheus Operator
+  # (the monitoring.coreos.com/v1 CRD wouldn't exist there). Turn this
+  # on in any environment that runs kube-prometheus-stack.
+  serviceMonitor:
+    enabled: false
+    # Scrape cadence. 30s matches kube-prometheus-stack's default for
+    # cluster-internal targets.
+    interval: 30s
+    # Per-scrape timeout; must be < interval.
+    scrapeTimeout: 10s
+    # Extra labels on the ServiceMonitor itself. Most kube-prometheus-
+    # stack installs require `release: kube-prometheus-stack` so the
+    # Prometheus CR's `serviceMonitorSelector` picks it up — your
+    # selector label will vary by install.
+    #   labels:
+    #     release: kube-prometheus-stack
+    labels: {}
+    # Optional relabel config applied BEFORE the scrape — useful for
+    # dropping high-cardinality target labels.
+    relabelings: []
+    # Optional relabel config applied AFTER the scrape — useful for
+    # dropping metrics families you don't want shipped to remote_write.
+    metricRelabelings: []
+    # NOTE: the nucel-ci-operator runs in a separate repo and ships its
+    # own manifests; its ServiceMonitor lives there (Fix H3 added the
+    # operator's /metrics endpoint + Service). See
+    # PRODUCTION_HARDENING.md for the follow-up.
+
+# -- HorizontalPodAutoscaler for the main nucel-server Deployment (Fix H1).
+#
+# Off by default so single-node / homelab installs keep the simple
+# fixed-replica behaviour from `server.replicas`. When enabled, the HPA
+# takes over replica count — `server.replicas` becomes the floor only
+# at first install (HPA writes its own scale subresource after that).
+#
+# CPU + memory targets only; queue-depth driven scaling
+# (nucel_bg_job_depth) needs prometheus-adapter wiring and is documented
+# as a follow-up in PRODUCTION_HARDENING.md rather than shipped here.
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+  # behavior: optional autoscaling/v2 behavior block (stabilization
+  # windows, scaling policies). Empty = controller defaults.
+  behavior: {}
+
+# -- PodDisruptionBudget for the main nucel-server Deployment (Fix H2).
+#
+# On by default; `minAvailable: 1` keeps at least one server pod up
+# during voluntary disruptions (node drain, cluster upgrade, Karpenter
+# consolidation). Pair with `server.replicas >= 2` (or
+# `autoscaling.enabled: true`) — with a single replica the PDB will
+# block drains entirely.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+  # Set maxUnavailable instead of minAvailable by leaving minAvailable
+  # null and setting this. Only one of the two may be set.
+  maxUnavailable: null

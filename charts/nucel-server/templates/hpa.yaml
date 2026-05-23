@@ -1,0 +1,47 @@
+{{- if and .Values.autoscaling .Values.autoscaling.enabled }}
+# Fix H1 — HorizontalPodAutoscaler for the main nucel-server Deployment.
+#
+# CPU + memory targets only. Queue-depth scaling (nucel_bg_job_depth)
+# would need prometheus-adapter to expose the metric to the K8s metrics
+# API; that's documented as a follow-up in PRODUCTION_HARDENING.md
+# rather than shipped here so the chart doesn't acquire a hard
+# dependency on prometheus-adapter.
+#
+# `server.replicas` becomes the initial replica count only; once the
+# HPA writes the scale subresource, it owns replica count from then on.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: nucel-server
+  namespace: {{ include "nucel.namespace" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nucel-server
+  minReplicas: {{ .Values.autoscaling.minReplicas | default 2 }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas | default 10 }}
+  metrics:
+    {{- if .Values.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+    {{- end }}
+    {{- if .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- end }}
+  {{- with .Values.autoscaling.behavior }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,121 @@
+{{- if and .Values.worker .Values.worker.pools }}
+{{- range $pool := .Values.worker.pools }}
+---
+# Per-kind worker pool. One Deployment per entry in `worker.pools[]`.
+# Each pool runs the same `nucel-worker` binary but pinned to a subset
+# of job kinds via NUCEL_JOB_KINDS so a webhook storm in one pool
+# doesn't starve a latency-sensitive kind in another.
+#
+# Sharding: optional `shardCount` / `shardIndex` lets you point a pool
+# at a hash partition of the queue (bg_job.shard_key % shardCount ==
+# shardIndex). Useful when you scale a single kind to many replicas.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nucel-worker-{{ $pool.name }}
+  namespace: {{ include "nucel.namespace" $ }}
+  labels:
+    {{- include "nucel.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: worker-pool
+    nucel.io/pool: {{ $pool.name }}
+  annotations:
+    checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") $ | sha256sum }}
+    checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") $ | sha256sum }}
+spec:
+  replicas: {{ $pool.replicas | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "nucel.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: worker-pool
+      nucel.io/pool: {{ $pool.name }}
+  template:
+    metadata:
+      labels:
+        {{- include "nucel.selectorLabels" $ | nindent 8 }}
+        app.kubernetes.io/component: worker-pool
+        nucel.io/pool: {{ $pool.name }}
+    spec:
+      serviceAccountName: {{ include "nucel.serviceAccountName" $ }}
+      containers:
+        - name: worker
+          image: "{{ $.Values.image.repository }}:{{ $.Values.image.tag | default $.Chart.AppVersion }}"
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          command: ["/usr/local/bin/nucel-worker"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "nucel.configMapName" $ }}
+          env:
+            - name: NUCEL_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" $ }}
+                  key: NUCEL_DB_USER
+            - name: NUCEL_DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" $ }}
+                  key: NUCEL_DB_PASS
+            - name: NUCEL_HOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" $ }}
+                  key: NUCEL_HOOK_SECRET
+            {{- if $.Values.secrets.oidcPrivateKey }}
+            - name: NUCEL_OIDC_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" $ }}
+                  key: NUCEL_OIDC_PRIVATE_KEY
+            {{- end }}
+            - name: NUCEL_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- if $pool.kinds }}
+            - name: NUCEL_JOB_KINDS
+              value: {{ join "," $pool.kinds | quote }}
+            {{- end }}
+            {{- with $pool.shardIndex }}
+            - name: NUCEL_JOB_SHARD_INDEX
+              value: "{{ . }}"
+            {{- end }}
+            {{- with $pool.shardCount }}
+            - name: NUCEL_JOB_SHARD_COUNT
+              value: "{{ . }}"
+            {{- end }}
+            {{- with $pool.batchSize }}
+            - name: NUCEL_JOB_BATCH
+              value: "{{ . }}"
+            {{- end }}
+            {{- with $pool.pollMs }}
+            - name: NUCEL_JOB_POLL_MS
+              value: "{{ . }}"
+            {{- end }}
+            {{- with $pool.leaseSeconds }}
+            - name: NUCEL_JOB_LEASE_SECS
+              value: "{{ . }}"
+            {{- end }}
+          volumeMounts:
+            - name: repos
+              mountPath: /data/repos
+              readOnly: true
+            - name: registry
+              mountPath: /data/registry
+              readOnly: true
+            - name: npm
+              mountPath: /data/npm
+              readOnly: true
+          resources:
+            {{- toYaml ($pool.resources | default $.Values.worker.resources) | nindent 12 }}
+      volumes:
+        - name: repos
+          persistentVolumeClaim:
+            claimName: nucel-repos
+        - name: registry
+          persistentVolumeClaim:
+            claimName: nucel-registry
+        - name: npm
+          persistentVolumeClaim:
+            claimName: nucel-npm
+{{- end }}
+{{- end }}

@@ -1,0 +1,55 @@
+{{- if and .Values.nodePool .Values.nodePool.create }}
+# Custom NodePool — ARM64 (Graviton) only.
+#
+# Modifying the EKS Auto Mode managed `general-purpose` / `system`
+# NodePools doesn't stick: the EKS reconciler reverts arch overrides
+# back to amd64. The supported pattern is to ship our own NodePool
+# (which Auto Mode does not reconcile) and lean on it for all our
+# workloads. Mirrors the proven setup in conek-rails (see
+# infra/layers/200-addons/main.tofu in that repo).
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: {{ .Values.nodePool.name }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+spec:
+  disruption:
+    budgets:
+      - nodes: "10%"
+    consolidateAfter: 300s
+    consolidationPolicy: WhenEmptyOrUnderutilized
+  template:
+    spec:
+      expireAfter: 336h
+      nodeClassRef:
+        group: eks.amazonaws.com
+        kind: NodeClass
+        name: default
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values:
+            - on-demand
+        - key: eks.amazonaws.com/instance-category
+          operator: In
+          values:
+            - c
+            - m
+            - r
+        - key: eks.amazonaws.com/instance-generation
+          operator: Gt
+          values:
+            - "6"
+        - key: kubernetes.io/arch
+          operator: In
+          values:
+            - arm64
+        - key: kubernetes.io/os
+          operator: In
+          values:
+            - linux
+  limits:
+    cpu: "{{ .Values.nodePool.limits.cpu }}"
+    memory: "{{ .Values.nodePool.limits.memory }}"
+{{- end }}

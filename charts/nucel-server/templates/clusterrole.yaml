@@ -9,6 +9,16 @@ rules:
   - apiGroups: ["nucel.io"]
     resources: ["pipelinejobruns"]
     verbs: ["get", "list", "create", "delete"]
+  # AW dispatch: nucel-server creates K8s Jobs directly for AW runner pods
+  # (bypasses the CI operator so no PipelineJobRun CRD schema changes needed)
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "delete", "get", "list"]
+  # AW dispatch: per-run Secret carries runner token + base64 JobSpec.
+  # Created before the Job; DELETEd on run completion / stuck-runner sweep.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "delete", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

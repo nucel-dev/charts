@@ -21,5 +21,30 @@ data:
   NUCEL_LOG_LEVEL: {{ .Values.logging.level | quote }}
   RUST_LOG: {{ .Values.logging.rustLog | quote }}
   NUCEL_OIDC_ISSUER: {{ .Values.oidc.issuer | quote }}
+  # Browsers silently drop a Secure cookie over plain HTTP, so this
+  # opts in only when the deployment sits behind HTTPS (typical
+  # production / preview environments). Defaults to "1" because
+  # ingress.tls is true by default in this chart.
+  {{- if and .Values.cookies .Values.cookies.secure }}
+  NUCEL_SECURE_COOKIE: {{ .Values.cookies.secure | quote }}
+  {{- else }}
+  NUCEL_SECURE_COOKIE: "1"
+  {{- end }}
   NUCEL_CI_K8S_NAMESPACE: {{ .Values.ciNamespace | quote }}
   NUCEL_CI_API_URL: "http://nucel-server.{{ include "nucel.namespace" . }}.svc.cluster.local:{{ .Values.server.port }}"
+  # Repo storage backend selection (T1-9). `local` keeps repos on the
+  # PVC; `s3` enables the cold tier on object storage (local PVC stays
+  # as the hot cache).
+  {{- if .Values.repoStorage }}
+  NUCEL_REPO_STORAGE: {{ .Values.repoStorage.kind | default "local" | quote }}
+  {{- if eq (.Values.repoStorage.kind | default "") "s3" }}
+  NUCEL_S3_BUCKET: {{ .Values.repoStorage.s3.bucket | quote }}
+  NUCEL_S3_PREFIX: {{ .Values.repoStorage.s3.prefix | quote }}
+  NUCEL_S3_REGION: {{ .Values.repoStorage.s3.region | quote }}
+  {{- with .Values.repoStorage.s3.endpoint }}
+  NUCEL_S3_ENDPOINT: {{ . | quote }}
+  {{- end }}
+  {{- end }}
+  {{- else }}
+  NUCEL_REPO_STORAGE: "local"
+  {{- end }}

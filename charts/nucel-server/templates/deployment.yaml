@@ -17,22 +17,16 @@ spec:
     metadata:
       labels:
         {{- include "nucel.selectorLabels" . | nindent 8 }}
+        # Distinguishes server pods from worker / seed pods deployed
+        # off the same chart. The seed Job's podAffinity uses this
+        # label to land on the same node as a server pod (RWO PVC
+        # constraint when seed.mountRepos is true).
+        app.kubernetes.io/component: server
     spec:
       serviceAccountName: {{ include "nucel.serviceAccountName" . }}
-      # PVCs land at /data/* via the EBS CSI driver. EKS Auto Mode +
-      # Bottlerocket attach the volume root-owned with 0755 mode, but
-      # the kubelet only chowns the mount when fsGroup is set —
-      # without it, root inside the container hits EACCES on
-      # create_dir_all because the kernel-side mount uid/gid don't
-      # match the container's. Setting fsGroup: 0 (root group) +
-      # OnRootMismatch makes the kubelet fix-up the ownership on
-      # every attach, fast (only chmods the root if it diverges).
-      securityContext:
-        fsGroup: 0
-        fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: server
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - containerPort: {{ .Values.server.port }}
@@ -43,6 +37,15 @@ spec:
             - configMapRef:
                 name: {{ include "nucel.configMapName" . }}
           env:
+            # Fix M5 — schema is applied by the pre-upgrade migration Hook
+            # Job, not by each server pod at boot. Skip the in-process
+            # apply_schema call to avoid the race when 2+ pods restart
+            # together. Gated on migrations.enabled so installs that
+            # disable the hook still get schema applied at startup.
+            {{- if and .Values.migrations .Values.migrations.enabled }}
+            - name: NUCEL_SKIP_SCHEMA
+              value: "1"
+            {{- end }}
             - name: NUCEL_DB_USER
               valueFrom:
                 secretKeyRef:
@@ -63,12 +66,97 @@ spec:
                 secretKeyRef:
                   name: {{ include "nucel.secretName" . }}
                   key: NUCEL_HOOK_SECRET
-            {{- if .Values.secrets.oidcPrivateKey }}
+            # OIDC private key: always wired from the Secret. When
+            # ExternalSecrets is on (chart-managed Secret is skipped),
+            # the ExternalSecret target Secret has the same name so
+            # this resolves the same way. The key is required at
+            # install-time by `secrets.requireProductionValues` (Fix C8).
             - name: NUCEL_OIDC_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "nucel.secretName" . }}
                   key: NUCEL_OIDC_PRIVATE_KEY
+                  optional: true
+            # Metrics bearer token (Fix H9 — required when
+            # prometheus.requireAuth=true). `optional: true` so the pod
+            # still boots in dev overlays that disable the requirement.
+            - name: NUCEL_METRICS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" . }}
+                  key: NUCEL_METRICS_TOKEN
+                  optional: true
+            {{- if .Values.secrets.openrouterKey }}
+            - name: NUCEL_OPENROUTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" . }}
+                  key: NUCEL_OPENROUTER_KEY
+            {{- end }}
+            {{- if .Values.secrets.anthropicApiKey }}
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" . }}
+                  key: ANTHROPIC_API_KEY
+            {{- end }}
+            # Bot account for per-run PAT minting (AW dispatch). Optional —
+            # when unset, AW K8s dispatch is skipped (stub mode).
+            - name: NUCEL_GIT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" . }}
+                  key: NUCEL_GIT_USER
+                  optional: true
+            - name: NUCEL_GIT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" . }}
+                  key: NUCEL_GIT_PASSWORD
+                  optional: true
+            # Fix C9 — SSH host key path. Always set; the file mount
+            # under `volumes` below is gated on `secrets.sshHostKey`
+            # being non-empty (or being provided via ExternalSecrets).
+            # When the file isn't present the server falls back to an
+            # ephemeral key and logs a warning (existing behaviour).
+            - name: NUCEL_SSH_HOST_KEY_PATH
+              value: /etc/nucel/ssh-host-key/NUCEL_SSH_HOST_KEY
+            {{- if .Values.agentWorkflows }}
+            # AW K8s dispatch — empty url disables runner pod creation.
+            {{- if and .Values.agentWorkflows.k8s .Values.agentWorkflows.k8s.url }}
+            - name: NUCEL_AW_K8S_URL
+              value: {{ .Values.agentWorkflows.k8s.url | quote }}
+            - name: NUCEL_AW_K8S_NAMESPACE
+              value: {{ .Values.agentWorkflows.k8s.namespace | quote }}
+            {{- if .Values.agentWorkflows.k8s.apiUrl }}
+            - name: NUCEL_AW_API_URL
+              value: {{ .Values.agentWorkflows.k8s.apiUrl | quote }}
+            {{- end }}
+            {{- if .Values.agentWorkflows.k8s.runnerImage }}
+            - name: NUCEL_AW_RUNNER_IMAGE
+              value: {{ .Values.agentWorkflows.k8s.runnerImage | quote }}
+            {{- end }}
+            {{- if .Values.agentWorkflows.k8s.anthropicSecret }}
+            - name: NUCEL_AW_ANTHROPIC_SECRET
+              value: {{ .Values.agentWorkflows.k8s.anthropicSecret | quote }}
+            {{- end }}
+            {{- end }}
+            - name: NUCEL_AW_TICK_PERIOD_SECS
+              value: {{ .Values.agentWorkflows.tickPeriodSeconds | quote }}
+            - name: NUCEL_AW_MANUAL_TRIGGER_PER_MIN
+              value: {{ .Values.agentWorkflows.manualTriggerPerMin | quote }}
+            - name: NUCEL_AW_ORG_MANUAL_TRIGGER_PER_MIN
+              value: {{ .Values.agentWorkflows.orgManualTriggerPerMin | quote }}
+            - name: NUCEL_AW_DAILY_ORG_USD_CAP
+              value: {{ .Values.agentWorkflows.dailyOrgUsdCap | quote }}
+            - name: NUCEL_AW_NEEDS_REVIEW_TTL_HOURS
+              value: {{ .Values.agentWorkflows.needsReviewTtlHours | quote }}
+            - name: NUCEL_AW_RUN_STUCK_TIMEOUT_MIN
+              value: {{ .Values.agentWorkflows.runStuckTimeoutMin | quote }}
+            - name: NUCEL_AW_AUTO_DISABLE_AFTER_N_FAILS
+              value: {{ .Values.agentWorkflows.autoDisableAfterNFails | quote }}
+            - name: NUCEL_AW_ORG_MAX_CONCURRENT
+              value: {{ .Values.agentWorkflows.orgMaxConcurrent | quote }}
             {{- end }}
           volumeMounts:
             - name: repos
@@ -81,6 +169,12 @@ spec:
               mountPath: /data/npm
             - name: workspaces
               mountPath: /data/workspaces
+            # Fix C9 — SSH host key file. Volume is `optional: true`
+            # so the pod still boots when the key isn't set (server
+            # falls back to ephemeral + logs a warning).
+            - name: ssh-host-key
+              mountPath: /etc/nucel/ssh-host-key
+              readOnly: true
           livenessProbe:
             httpGet:
               path: /health
@@ -110,3 +204,18 @@ spec:
             claimName: nucel-npm
         - name: workspaces
           emptyDir: {}
+        # Fix C9 — SSH host key file projection. The Secret key
+        # `NUCEL_SSH_HOST_KEY` is exposed as a file at
+        # /etc/nucel/ssh-host-key/NUCEL_SSH_HOST_KEY (matches the env
+        # var above). `optional: true` keeps the pod scheduling even
+        # when the chart-managed Secret doesn't have the key — useful
+        # for ExternalSecrets installs where the key might lag the
+        # initial sync.
+        - name: ssh-host-key
+          secret:
+            secretName: {{ include "nucel.secretName" . }}
+            optional: true
+            defaultMode: 0400
+            items:
+              - key: NUCEL_SSH_HOST_KEY
+                path: NUCEL_SSH_HOST_KEY
