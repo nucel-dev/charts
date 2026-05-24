@@ -14,18 +14,23 @@ helm search repo nucel
 
 | Chart | Version | App Version | Description |
 |-------|---------|-------------|-------------|
-| [nucel-server](./charts/nucel-server)   | 0.1.15 | 0.5.9 | Self-hosted git platform with built-in CI/CD, container registry, and AI agent orchestration. |
-| [agent-operator](./charts/agent-operator) | 0.1.0  | 0.1.0 | Kubernetes operator for autonomous AI agent issue resolution. |
+| nucel-server   | 0.1.29 | 0.5.23 | Self-hosted git platform with built-in CI/CD, container registry, and AI agent orchestration. |
+| agent-operator | 0.1.0  | 0.1.0  | Kubernetes operator for autonomous AI agent issue resolution. |
+| nucel-web      | 0.1.0  | 0.1.3  | Marketing site (SvelteKit) for nucel. |
 
 ## Installing a chart
 
 ```bash
 # nucel-server (latest)
-helm install nucel-server nucel/nucel-server --version 0.1.15 \
+helm install nucel nucel/nucel-server \
   --namespace nucel --create-namespace
 
 # agent-operator
-helm install agent-operator nucel/agent-operator --version 0.1.0 \
+helm install agent-operator nucel/agent-operator \
+  --namespace nucel --create-namespace
+
+# nucel-web
+helm install nucel-web nucel/nucel-web \
   --namespace nucel --create-namespace
 ```
 
@@ -33,7 +38,7 @@ helm install agent-operator nucel/agent-operator --version 0.1.0 \
 
 ```bash
 helm search repo nucel/nucel-server --versions
-helm install nucel-server nucel/nucel-server --version 0.1.15
+helm install nucel nucel/nucel-server --version 0.1.29
 ```
 
 ## Release flow

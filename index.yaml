@@ -10,7 +10,7 @@ entries:
           url: https://github.com/nucel-dev/agent-operator#readme
     apiVersion: v2
     appVersion: 0.1.0
-    created: "2026-04-08T19:55:56.786839+02:00"
+    created: "2026-05-25T00:04:23.648396+02:00"
     description: Kubernetes operator that drives AI agents to autonomously resolve
       issues — connect any GitHub repo + Paperclip board, get PRs from an AI team.
     digest: 9d4b42cdaad6fed831eaff6464d5e6feac97b04937bae7f9ee869182ccd4d1ba
@@ -32,7 +32,7 @@ entries:
     - https://github.com/nucel-dev/agent-operator
     type: application
     urls:
-    - https://nucel-dev.github.io/charts/agent-operator-0.1.0.tgz
+    - https://charts.nucel.dev/agent-operator-0.1.0.tgz
     version: 0.1.0
   nucel-server:
   - annotations:
@@ -43,8 +43,41 @@ entries:
         - name: Documentation
           url: https://github.com/nucel-dev/nucel#readme
     apiVersion: v2
+    appVersion: 0.5.23
+    created: "2026-05-25T00:04:23.653011+02:00"
+    description: Self-hosted git platform with built-in CI/CD, container registry,
+      and AI agent orchestration.
+    digest: 7f5b39668e53061cbe10ae6b31120fb820fbc13d999c5cacbae35f0d98a3e1c5
+    home: https://nucel.dev
+    keywords:
+    - git
+    - ci-cd
+    - devops
+    - self-hosted
+    - kubernetes
+    - ai-agents
+    - container-registry
+    maintainers:
+    - email: hello@nucel.dev
+      name: Nucel
+      url: https://nucel.dev
+    name: nucel-server
+    sources:
+    - https://github.com/nucel-dev/nucel
+    type: application
+    urls:
+    - https://charts.nucel.dev/nucel-server-0.1.29.tgz
+    version: 0.1.29
+  - annotations:
+      artifacthub.io/license: MIT
+      artifacthub.io/links: |
+        - name: GitHub
+          url: https://github.com/nucel-dev/nucel
+        - name: Documentation
+          url: https://github.com/nucel-dev/nucel#readme
+    apiVersion: v2
     appVersion: 0.1.0
-    created: "2026-04-08T19:55:56.787116+02:00"
+    created: "2026-05-25T00:04:23.650687+02:00"
     description: Self-hosted git platform with built-in CI/CD, container registry,
       and AI agent orchestration.
     digest: f19a6d2d0421eccfb9abc32e04a697c01f39ff86ed4ab1af474749a95857688d
@@ -66,6 +99,26 @@ entries:
     - https://github.com/nucel-dev/nucel
     type: application
     urls:
-    - https://nucel-dev.github.io/charts/nucel-server-0.1.0.tgz
+    - https://charts.nucel.dev/nucel-server-0.1.0.tgz
     version: 0.1.0
-generated: "2026-04-08T19:55:56.785933+02:00"
+  nucel-web:
+  - apiVersion: v2
+    appVersion: 0.1.3
+    created: "2026-05-25T00:04:23.653556+02:00"
+    description: 'Marketing site (SvelteKit) for nucel — the workflow layer for AI-native
+      development. Replaces the hand-rolled manifests under web/k8s/. Includes an
+      optional pre-launch staging gate (HTTP basic auth) implemented in the SvelteKit
+      `hooks.server.ts` layer, because the cluster''s ALB ingress controller doesn''t
+      support the nginx auth-basic annotations. '
+    digest: 452134243b016a1a8ebfe416a75e7ac76502255791616dfb0fde699963ab4a52
+    maintainers:
+    - name: nucel-dev
+      url: https://github.com/nucel-dev
+    name: nucel-web
+    sources:
+    - https://github.com/nucel-dev/web
+    type: application
+    urls:
+    - https://charts.nucel.dev/nucel-web-0.1.0.tgz
+    version: 0.1.0
+generated: "2026-05-25T00:04:23.645779+02:00"
