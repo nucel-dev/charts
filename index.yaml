@@ -77,6 +77,39 @@ entries:
           url: https://github.com/nucel-dev/nucel#readme
     apiVersion: v2
     appVersion: 0.5.27
+    created: "2026-05-31T05:07:48.637264302Z"
+    description: Self-hosted git platform with built-in CI/CD, container registry,
+      and AI agent orchestration.
+    digest: 9fbb9aa7f482d84a2642edc005e71244cc5715f99b8828960ab812bb7081e1e1
+    home: https://nucel.dev
+    keywords:
+    - git
+    - ci-cd
+    - devops
+    - self-hosted
+    - kubernetes
+    - ai-agents
+    - container-registry
+    maintainers:
+    - email: hello@nucel.dev
+      name: Nucel
+      url: https://nucel.dev
+    name: nucel-server
+    sources:
+    - https://github.com/nucel-dev/nucel
+    type: application
+    urls:
+    - https://github.com/nucel-dev/charts/releases/download/nucel-server-0.1.38/nucel-server-0.1.38.tgz
+    version: 0.1.38
+  - annotations:
+      artifacthub.io/license: MIT
+      artifacthub.io/links: |
+        - name: GitHub
+          url: https://github.com/nucel-dev/nucel
+        - name: Documentation
+          url: https://github.com/nucel-dev/nucel#readme
+    apiVersion: v2
+    appVersion: 0.5.27
     created: "2026-05-31T00:40:16.677899634Z"
     description: Self-hosted git platform with built-in CI/CD, container registry,
       and AI agent orchestration.
@@ -101,4 +134,4 @@ entries:
     urls:
     - https://github.com/nucel-dev/charts/releases/download/nucel-server-0.1.37/nucel-server-0.1.37.tgz
     version: 0.1.37
-generated: "2026-05-31T00:40:16.677914602Z"
+generated: "2026-05-31T05:07:48.637280106Z"
