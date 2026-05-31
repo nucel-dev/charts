@@ -21,10 +21,37 @@ spec:
         prometheus.io/path: "/metrics"
     spec:
       serviceAccountName: {{ include "agent-operator.fullname" . }}
+      {{- with .Values.operator.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.operator.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.operator.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.operator.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.operator.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: operator
           image: {{ include "agent-operator.operatorImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           command: ["agent-operator-operator"]
           ports:
             - name: metrics
@@ -33,6 +60,15 @@ spec:
           env:
             - name: RUST_LOG
               value: "info,agent_operator_operator=debug"
+            # Downward API → leader-election identity + namespace detection.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             - name: OPERATOR_NAMESPACE
               value: {{ include "agent-operator.namespace" . | quote }}
             - name: OPERATOR_CONFIG
@@ -67,6 +103,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "agent-operator.secretName" . }}
                   key: anthropic-api-key
+            {{- if .Values.secrets.nucelGitApiKey }}
+            - name: NUCEL_GIT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agent-operator.secretName" . }}
+                  key: nucel-git-api-key
+            {{- end }}
           volumeMounts:
             - name: config
               mountPath: /etc/agent-operator

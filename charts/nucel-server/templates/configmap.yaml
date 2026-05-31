@@ -18,6 +18,10 @@ data:
   NUCEL_WORKSPACE_PATH: "/data/workspaces"
   NUCEL_REGISTRY_PATH: "/data/registry"
   NUCEL_NPM_PATH: "/data/npm"
+  # #244 — pages assets live on a mounted volume (see deployment.yaml). The
+  # binary defaults this to /data/pages; set explicitly so the mount path
+  # and the server agree.
+  NUCEL_PAGES_PATH: "/data/pages"
   NUCEL_LOG_LEVEL: {{ .Values.logging.level | quote }}
   RUST_LOG: {{ .Values.logging.rustLog | quote }}
   NUCEL_OIDC_ISSUER: {{ .Values.oidc.issuer | quote }}
@@ -35,16 +39,62 @@ data:
   # Repo storage backend selection (T1-9). `local` keeps repos on the
   # PVC; `s3` enables the cold tier on object storage (local PVC stays
   # as the hot cache).
-  {{- if .Values.repoStorage }}
-  NUCEL_REPO_STORAGE: {{ .Values.repoStorage.kind | default "local" | quote }}
-  {{- if eq (.Values.repoStorage.kind | default "") "s3" }}
-  NUCEL_S3_BUCKET: {{ .Values.repoStorage.s3.bucket | quote }}
-  NUCEL_S3_PREFIX: {{ .Values.repoStorage.s3.prefix | quote }}
-  NUCEL_S3_REGION: {{ .Values.repoStorage.s3.region | quote }}
-  {{- with .Values.repoStorage.s3.endpoint }}
+  #
+  # Precedence: the new `storage.classes.gitWorkspaces.backend=s3` (#236)
+  # turns on the cold tier; otherwise the legacy `repoStorage.kind` is
+  # honored. The local /data/repos PVC always remains the hot cache.
+  {{- $gwClass := default (dict) (index (default (dict) (default (dict) .Values.storage).classes) "gitWorkspaces") }}
+  {{- $gwS3 := default (dict) $gwClass.s3 }}
+  {{- $repoS3legacy := default (dict) (default (dict) .Values.repoStorage).s3 }}
+  {{- $repoS3on := or (eq (default "" $gwClass.backend) "s3") (and .Values.repoStorage (eq (.Values.repoStorage.kind | default "") "s3")) }}
+  {{- if $repoS3on }}
+  NUCEL_REPO_STORAGE: "s3"
+  NUCEL_S3_BUCKET: {{ (default $repoS3legacy.bucket $gwS3.bucket) | default "" | quote }}
+  NUCEL_S3_PREFIX: {{ (default $repoS3legacy.prefix $gwS3.prefix) | default "repos/" | quote }}
+  NUCEL_S3_REGION: {{ (default $repoS3legacy.region $gwS3.region) | default "eu-central-1" | quote }}
+  {{- $repoEndpoint := (default $repoS3legacy.endpoint $gwS3.endpoint) | default "" }}
+  {{- with $repoEndpoint }}
   NUCEL_S3_ENDPOINT: {{ . | quote }}
-  {{- end }}
   {{- end }}
   {{- else }}
   NUCEL_REPO_STORAGE: "local"
+  {{- end }}
+  # Pages asset storage backend. `fs` writes assets to the mounted pages
+  # volume (single-replica only — 50% 404 race with 2+ replicas unless that
+  # volume is ReadWriteMany). `s3` uploads each file so every replica serves
+  # identical bytes — the recommended multi-replica path (#244).
+  #
+  # Precedence: the new `storage.classes.pages.backend` (#236) wins when set
+  # to `s3`; otherwise the legacy `pagesStorage.kind` is honored. Empty s3.*
+  # fields fall back to repoStorage.s3.* (shared bucket, different prefix).
+  {{- $pagesClass := default (dict) (index (default (dict) (default (dict) .Values.storage).classes) "pages") }}
+  {{- $pagesS3FromClass := eq (default "" $pagesClass.backend) "s3" }}
+  {{- $pagesS3FromLegacy := and .Values.pagesStorage (eq (.Values.pagesStorage.kind | default "") "s3") }}
+  {{- $classS3 := default (dict) $pagesClass.s3 }}
+  {{- $legacyS3 := default (dict) (default (dict) .Values.pagesStorage).s3 }}
+  {{- $repoS3 := default (dict) (default (dict) .Values.repoStorage).s3 }}
+  {{- if or $pagesS3FromClass $pagesS3FromLegacy }}
+  NUCEL_PAGES_STORAGE: "s3"
+  NUCEL_PAGES_S3_BUCKET: {{ (default $legacyS3.bucket $classS3.bucket) | default $repoS3.bucket | default "" | quote }}
+  NUCEL_PAGES_S3_PREFIX: {{ (default $legacyS3.prefix $classS3.prefix) | default "pages/" | quote }}
+  NUCEL_PAGES_S3_REGION: {{ (default $legacyS3.region $classS3.region) | default $repoS3.region | default "eu-central-1" | quote }}
+  {{- $pagesEndpoint := (default $legacyS3.endpoint $classS3.endpoint) | default $repoS3.endpoint | default "" }}
+  {{- with $pagesEndpoint }}
+  NUCEL_PAGES_S3_ENDPOINT: {{ . | quote }}
+  {{- end }}
+  {{- else }}
+  NUCEL_PAGES_STORAGE: "fs"
+  {{- end }}
+  # MVP audit L11 — email backend. `NUCEL_SMTP_URL` lives in the
+  # email Secret (always contains creds). `NUCEL_EMAIL_FROM` and
+  # `NUCEL_BASE_URL` are plain config because they're not secret —
+  # leaking the From address or the public base URL is harmless.
+  {{- if .Values.email }}
+  {{- if .Values.email.from }}
+  NUCEL_EMAIL_FROM: {{ .Values.email.from | quote }}
+  {{- end }}
+  {{- if .Values.email.baseUrl }}
+  NUCEL_BASE_URL: {{ .Values.email.baseUrl | quote }}
+  {{- end }}
+  NUCEL_REQUIRE_VERIFIED_EMAIL: {{ .Values.email.requireVerifiedEmail | default false | quote }}
   {{- end }}

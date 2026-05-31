@@ -20,10 +20,37 @@ spec:
         prometheus.io/path: "/metrics"
     spec:
       serviceAccountName: {{ include "agent-operator.fullname" . }}-webhook
+      {{- with .Values.webhook.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.webhook.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.webhook.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.webhook.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.webhook.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: webhook
           image: {{ include "agent-operator.webhookImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           command: ["agent-operator-webhook"]
           ports:
             - name: http
@@ -46,6 +73,12 @@ spec:
                 secretKeyRef:
                   name: {{ include "agent-operator.webhookSecretName" . }}
                   key: jira-webhook-secret
+                  optional: true
+            - name: NUCEL_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agent-operator.webhookSecretName" . }}
+                  key: nucel-webhook-secret
                   optional: true
             - name: WEBHOOK_API_TOKEN
               valueFrom:

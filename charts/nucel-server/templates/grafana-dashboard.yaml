@@ -1,0 +1,48 @@
+{{- if and .Values.metrics .Values.metrics.enabled .Values.metrics.grafanaDashboard .Values.metrics.grafanaDashboard.enabled }}
+# Grafana dashboard ConfigMap (scale & queue overview).
+#
+# Discovered automatically by the kube-prometheus-stack Grafana sidecar
+# via the `grafana_dashboard: "1"` label (the sidecar watches all
+# namespaces for ConfigMaps carrying that label and side-loads the JSON).
+# Additive — it ships ALONGSIDE any hand-built dashboards; it doesn't
+# replace them.
+#
+# Panels cover what the server exports today:
+#   - SLO row (top): availability %, 5xx ratio, web/API p99, DB p99 —
+#     the at-a-glance SLO health that maps to the PrometheusRule alerts
+#     in templates/prometheusrule.yaml + docs/runbooks/slos.md
+#   - bg_job queue depth (per status / per kind)
+#   - runner throughput + fatal rate (dispatch_total)
+#   - claim latency p50/p95/p99 (claim_latency_seconds histogram)
+#   - DLQ stat
+#   - server pod CPU/mem + HPA current/desired/max (cAdvisor +
+#     kube-state-metrics, so the autoscaling story is visible next to
+#     the queue load that drives it)
+#   - HTTP / DB / SSE / Registry row: HTTP RED (rate by status class +
+#     p50/p95/p99 duration), DB query quantiles by op, open SSE
+#     connections by stream (the #281 leak guard), and registry blob
+#     throughput + latency — now that the Rust server exports the
+#     matching families (nucel_http_*, nucel_db_query_*,
+#     nucel_sse_connections, nucel_registry_blob_*).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nucel.fullname" . }}-grafana-dashboard
+  namespace: {{ include "nucel.namespace" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+    # Sidecar discovery label. Override the key/value via
+    # metrics.grafanaDashboard.sidecarLabel if your Grafana sidecar is
+    # configured with a non-default label selector.
+    {{ .Values.metrics.grafanaDashboard.sidecarLabel | default "grafana_dashboard" }}: "1"
+    {{- with .Values.metrics.grafanaDashboard.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  annotations:
+    # Folder the sidecar files the dashboard under (when the sidecar is
+    # configured with FOLDER_ANNOTATION support).
+    k8s-sidecar-target-directory: "{{ .Values.metrics.grafanaDashboard.folder | default "Nucel" }}"
+data:
+  nucel-server-overview.json: |-
+{{ .Files.Get "dashboards/nucel-server-overview.json" | indent 4 }}
+{{- end }}

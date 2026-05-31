@@ -22,6 +22,114 @@ server:
     limits:
       cpu: 1000m
       memory: 1Gi
+  # Rolling-update strategy for the server Deployment. Surge one extra
+  # pod, never drop below the desired count during a rollout, so the
+  # service stays at full capacity through upgrades. Set to `{}` to fall
+  # back to the Kubernetes default (RollingUpdate 25%/25%).
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  # Pin server pods to a node pool. Empty = schedule anywhere. The
+  # cluster-wide `affinity` / `topologySpreadConstraints` /
+  # `priorityClassName` keys (defined lower in this file) drive AZ spread
+  # and anti-affinity for the server Deployment.
+  nodeSelector: {}
+  tolerations: []
+  # Liveness/readiness/startup probe timings for the server container.
+  # `startup` is the slow-boot gate: SurrealDB connect + schema check +
+  # SSH host-key load can take a few seconds on a cold pod, and until the
+  # startup probe passes the liveness probe is NOT evaluated — so a slow
+  # boot can't be misread as a crash-loop. failureThreshold * periodSeconds
+  # (30 * 5s = 150s here) is the hard ceiling before the pod is restarted.
+  # Leave `startup.enabled: false` to fall back to initialDelaySeconds on
+  # the liveness probe (the pre-0.1.36 behaviour).
+  probes:
+    startup:
+      enabled: true
+      periodSeconds: 5
+      failureThreshold: 30
+      timeoutSeconds: 3
+    liveness:
+      initialDelaySeconds: 10
+      periodSeconds: 30
+      timeoutSeconds: 3
+      failureThreshold: 3
+    readiness:
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 3
+
+# -- Pod- and container-level SecurityContext for the server / worker /
+# worker-pool Deployments.
+#
+# IMPORTANT — the published `ghcr.io/nucel-dev/nucel-server` image runs as
+# root (uid 0: see docker/Dockerfile.server, debian:bookworm-slim with no
+# USER) and the server writes to its PVC mounts (/data/*) plus the Vite
+# manifest dir, so `runAsNonRoot: true` and `readOnlyRootFilesystem: true`
+# are NOT defaulted on — flipping them on the stock image will crash-loop
+# the pod. They are exposed here so operators who rebuild a nonroot image
+# (`USER 65532` + a writable fsGroup on the PVCs) can switch the full
+# restricted profile on without forking the chart.
+#
+# What IS on by default (safe for the root image, satisfies the bulk of
+# Pod Security "restricted" minus the runAsNonRoot/RORFS pair):
+#   - allowPrivilegeEscalation: false
+#   - capabilities.drop: ["ALL"]
+#   - seccompProfile: RuntimeDefault
+#
+# Both blocks are passed through verbatim (toYaml) — set either to `{}` to
+# emit nothing, or extend with runAsUser/fsGroup/runAsNonRoot/
+# readOnlyRootFilesystem for a hardened image.
+podSecurityContext:
+  seccompProfile:
+    type: RuntimeDefault
+  # runAsNonRoot: true        # enable only on a nonroot-rebuilt image
+  # runAsUser: 65532
+  # runAsGroup: 65532
+  # fsGroup: 65532            # needed so the non-root uid can write the PVCs
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+  # runAsNonRoot: true        # enable only on a nonroot-rebuilt image
+  # runAsUser: 65532
+  # readOnlyRootFilesystem: true   # server writes /app + /data, leave off
+  #                                  unless you mount emptyDirs over them
+
+# -- NetworkPolicy for the nucel-server namespace (defense in depth).
+#
+# Off by default so the chart still renders on clusters without a CNI that
+# enforces NetworkPolicy (the object is inert there, but we keep the
+# surface opt-in for parity with the other security toggles). When
+# enabled, the policy:
+#   - applies to server + worker + worker-pool pods (selected by
+#     app.kubernetes.io/name=nucel)
+#   - INGRESS: allows the HTTP (17321) + SSH (2222) ports from anywhere by
+#     default (the ingress controller / LB lives in another namespace);
+#     narrow `ingress.from` to your ingress-controller namespace for a
+#     tighter policy.
+#   - EGRESS: allowed to everywhere by default (the server talks to
+#     SurrealDB/TiKV, S3, SMTP, the K8s API, arbitrary webhook targets and
+#     git remotes — an allowlist here is install-specific). DNS (UDP/TCP
+#     53) is always permitted. Set `egress.denyAll: true` + populate
+#     `egress.to` to lock egress down to known CIDRs/namespaces.
+networkPolicy:
+  enabled: false
+  # Extra ingress `from` peers (namespaceSelector / podSelector / ipBlock).
+  # Empty = allow the server ports from any source.
+  ingress:
+    from: []
+  egress:
+    # When false (default) the policy allows all egress. When true, only
+    # DNS + the entries under `egress.to` are permitted.
+    denyAll: false
+    to: []
 
 # -- Worker deployment (standalone JobRunner).
 #
@@ -53,6 +161,37 @@ worker:
     limits:
       cpu: 500m
       memory: 512Mi
+
+  # Pod scheduling for the standalone worker Deployment. Defaults to a
+  # soft pod anti-affinity by hostname so worker replicas spread across
+  # nodes; pair `topologySpreadConstraints` with a zone key for AZ
+  # spread. All keys are overridable / emptyable.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  nodeSelector: {}
+  tolerations: []
+  priorityClassName: ""
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: nucel
+                app.kubernetes.io/component: worker
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: nucel
+          app.kubernetes.io/component: worker
 
   # Per-kind worker pools. Each entry becomes its own Deployment
   # (`nucel-worker-<name>`). Pinning specific job kinds to dedicated
@@ -120,6 +259,35 @@ domain: nucel.dev
 oidc:
   issuer: "https://nucel.dev"
 
+# -- Email backend (MVP audit L11 — SMTP-based, no SES SDK).
+#
+# `smtpUrl` is required for any kind of mail to leave the cluster. When
+# unset, the server runs in graceful no-op mode (logs each would-send
+# warning) so dev / preview environments still boot. The URL goes into
+# a dedicated Secret (`<release>-email`) so SES rotation doesn't touch
+# the main nucel-secret blob.
+#
+# Format: `smtps://USER:PASS@HOST:PORT` for implicit TLS (SES on 465),
+# or `smtp://USER:PASS@HOST:PORT` for STARTTLS. URL-encode any `/` or
+# `+` chars in the password (SES SMTP creds frequently contain them).
+#
+# `from` is the `From:` header on every outbound message; must be a
+# domain SES is authorized to send for. `baseUrl` is the public origin
+# used to build verification / reset links — it should match the
+# ingress host or the email link will land on the wrong server.
+#
+# `requireVerifiedEmail` is a placeholder flag for the future
+# email-verification *requirement* (block login / write operations
+# until the user verifies). The handlers ship today as opt-in: tokens
+# get minted and emailed on signup, but the user can still sign in
+# while unverified. Flip this true once the frontend + middleware
+# are wired (a later MVP item, not this audit fix).
+email:
+  smtpUrl: ""
+  from: "Nucel <no-reply@nucel.dev>"
+  baseUrl: "https://nucel.dev"
+  requireVerifiedEmail: false
+
 # -- Session cookies
 cookies:
   # Secure flag — required over HTTPS, breaks login over plain HTTP.
@@ -169,6 +337,102 @@ storage:
   # volumeBindingMode: WaitForFirstConsumer for multi-AZ correctness).
   storageClassName: ""
 
+  # ───────────────────────────────────────────────────────────────────────
+  # Per-data-class storage strategy (#236 / #244).
+  #
+  # The ORIGINAL bug (#244): Pages assets were written to the container's
+  # ephemeral filesystem (`/data/pages`, never mounted), so they were wiped
+  # on every pod cycle AND invisible to sibling replicas (50% 404 race). The
+  # registry / npm / artifact PVCs are ReadWriteOnce, which cannot attach to
+  # more than one pod — the Multi-Attach errors hit under HPA / replicas > 1.
+  #
+  # The FIX: pick a backend per data class. For data that several replicas
+  # must read identically, choose `s3` (object storage, IRSA-authenticated)
+  # where the binary supports it, or a ReadWriteMany PVC (EFS / NFS / CephFS)
+  # where it doesn't.
+  #
+  # backend:
+  #   s3        — object storage shared across all replicas. ONLY valid for
+  #               `pages` and `repos`/`gitWorkspaces` (the binary speaks S3
+  #               for those two; the chart `fail`s if you set it elsewhere).
+  #               Authenticate via IRSA (set serviceAccount.annotations) or
+  #               static keys under the class's `s3.*` block.
+  #   pvc       — a PersistentVolumeClaim. Set `accessMode: ReadWriteMany`
+  #               for multi-replica (EFS/NFS/CephFS); ReadWriteOnce is
+  #               single-replica only and the chart `fail`s if RWO is paired
+  #               with replicas > 1 or HPA on a shared class.
+  #   emptyDir  — ephemeral per-pod scratch. Single-replica only for shared
+  #               classes (chart `fail`s otherwise). Fine for `workspaces`
+  #               (CI build scratch that is recreated each run).
+  #
+  # Data classes:
+  #   pages          static Pages assets        → s3 (recommended) | pvc(RWX)
+  #   registry       OCI container blobs        → pvc(RWX) | pvc(RWO,1-rep)
+  #   npm            npm tarballs               → pvc(RWX) | pvc(RWO,1-rep)
+  #   artifacts      CI artifacts + logs        → pvc(RWX) | pvc(RWO,1-rep)
+  #   gitWorkspaces  bare git repos (/data/repos hot cache; also the
+  #                  worker's read-only mount)  → pvc(RWX) | s3(cold tier)
+  #   workspaces     CI checkout scratch        → emptyDir (default)
+  #
+  # NOTE: registry / npm / artifacts are filesystem-only in the nucel-server
+  # binary today (no S3 driver) — `backend: s3` is rejected for them. For
+  # multi-replica these MUST use a ReadWriteMany class. `gitWorkspaces` always
+  # keeps a local PVC as the hot cache even when `s3` is enabled (the S3
+  # backend is a cold tier; ensure_local() faults repos back in on access).
+  #
+  # Leaving `storage.classes` empty preserves the legacy behaviour (RWO PVCs
+  # sized from storage.repos/ciData/registry/npm, pages on emptyDir) so
+  # existing single-replica installs upgrade unchanged.
+  classes:
+    pages:
+      # s3 strongly recommended for any multi-replica / HPA install.
+      backend: emptyDir
+      size: 10Gi
+      accessMode: ReadWriteOnce
+      storageClassName: ""
+      s3:
+        # Empty bucket/region/endpoint fall back to repoStorage.s3.* (same
+        # bucket, different prefix) — matches the existing pagesStorage
+        # convenience behaviour. Prefer IRSA over static keys.
+        bucket: ""
+        prefix: "pages/"
+        region: ""
+        endpoint: ""
+        accessKeyId: ""
+        secretAccessKey: ""
+    registry:
+      backend: pvc
+      size: 20Gi
+      # ReadWriteMany (EFS/NFS/CephFS) is REQUIRED for replicas > 1.
+      accessMode: ReadWriteOnce
+      storageClassName: ""
+    npm:
+      backend: pvc
+      size: 10Gi
+      accessMode: ReadWriteOnce
+      storageClassName: ""
+    artifacts:
+      backend: pvc
+      size: 50Gi
+      accessMode: ReadWriteOnce
+      storageClassName: ""
+    gitWorkspaces:
+      backend: pvc
+      size: 50Gi
+      accessMode: ReadWriteOnce
+      storageClassName: ""
+      # s3.* here drives repoStorage cold-tier when backend=s3; the local
+      # PVC above always stays as the hot cache.
+      s3:
+        bucket: ""
+        prefix: "repos/"
+        region: "eu-central-1"
+        endpoint: ""
+        accessKeyId: ""
+        secretAccessKey: ""
+    workspaces:
+      backend: emptyDir
+
 # -- Repo storage backend (T1-9). `local` keeps every git repo on
 # the PVC at /data/repos — fine for ~10k repos. `s3` enables a cold
 # tier on object storage so idle repos can be archived off the
@@ -188,6 +452,26 @@ repoStorage:
     # Static credentials. Prefer leaving these empty and using IRSA
     # (AWS) / a workload identity binding (GCP) / a mounted
     # service account (Hetzner) so credentials don't sit in env.
+    accessKeyId: ""
+    secretAccessKey: ""
+
+# -- Pages asset storage backend (MVP-demo v6 Bug 2 unblock).
+# `fs` (default) writes the built static site to the local pod's
+# `/data/pages` PVC — fine for single-replica deploys, BUT with 2+
+# replicas only the pod that ran deploy_pages can serve the assets
+# (50% 404 race per request). `s3` puts each file on object storage
+# so every replica reads identical bytes.
+#
+# When `kind: s3`, leaving s3.* fields empty falls back to the matching
+# `repoStorage.s3.*` field — convenient when both stores live in the
+# same bucket with different prefixes.
+pagesStorage:
+  kind: fs
+  s3:
+    bucket: ""
+    prefix: "pages/"
+    region: "eu-central-1"
+    endpoint: ""
     accessKeyId: ""
     secretAccessKey: ""
 
@@ -276,17 +560,45 @@ secrets:
   # Set `requireProductionValues: false` to relax for local dev /
   # ephemeral preview environments.
   oidcPrivateKey: ""
-  # Ed25519 private key (OpenSSH format) used as the SSH server's host
-  # key. When unset, each pod boots with an ephemeral host key and
-  # `~/.ssh/known_hosts`-pinned clients see a MITM warning on every
-  # restart. Generate once with:
-  #   ssh-keygen -t ed25519 -N "" -f nucel-ssh-host -C "nucel-ssh-host"
-  #   cat nucel-ssh-host    # PEM private key — paste into this field
+  # B-15 -- session cookie signing key shared across every nucel-server
+  # replica. Hex-encoded (>= 128 hex chars = 64 raw bytes) OR any ASCII
+  # / byte string >= 64 bytes. Generate with:
+  #   openssl rand -hex 64
   #
-  # Fix C9: when set, the chart mounts the key into the server pod at
+  # Without this set, each pod signs `nucel_session` cookies with its
+  # own ephemeral key and any request routed to a sibling pod by the
+  # load balancer fails signature verification, logging the user out.
+  #
+  # When `secrets.requireProductionValues=true` this is required at
+  # install time. Otherwise the chart generates one on first install
+  # via `randAlphaNum 64` and reuses it on every upgrade via a `lookup`
+  # of the existing Secret (so rotation is intentional, not accidental
+  # -- rotating invalidates every active session).
+  sessionKey: ""
+  # Ed25519 private key (OpenSSH or PKCS#8 PEM) used as the SSH server's
+  # host key.
+  #
+  # Auto-generation (added Wave neoconto cluster audit):
+  #   When this value is empty, the chart auto-generates a fresh Ed25519
+  #   key on first install (via Helm's `genPrivateKey "ed25519"`, PKCS#8
+  #   PEM) and carries it forward verbatim on every subsequent upgrade
+  #   via `lookup`. The russh-keys crate accepts both OpenSSH and PKCS#8
+  #   PEM Ed25519 keys, so the auto-generated key works without any
+  #   format conversion.
+  #
+  #   This eliminates the "SSH server failed to start: No such file or
+  #   directory" warning on fresh installs without requiring operators
+  #   to pre-generate a host key out of band.
+  #
+  # Operator-supplied (still preferred for installs that rotate the
+  # host key out-of-band):
+  #   ssh-keygen -t ed25519 -N "" -f nucel-ssh-host -C "nucel-ssh-host"
+  #   cat nucel-ssh-host    # OpenSSH PEM — paste into this field
+  #
+  # Fix C9: chart mounts the key into the server pod at
   # /etc/nucel/ssh-host-key and points `NUCEL_SSH_HOST_KEY_PATH` at it
-  # (the server already reads the host key from a file via that env
-  # var — see crates/nucel-server/src/ssh/mod.rs::load_or_generate_host_key).
+  # (the server reads the host key from a file via that env var — see
+  # crates/nucel-server/src/ssh/mod.rs::load_or_generate_host_key).
   sshHostKey: ""
   # Bearer token Prometheus must send as `Authorization: Bearer <token>`
   # to scrape /metrics. When unset the endpoint serves anonymously
@@ -326,6 +638,29 @@ secrets:
   # WARNING: do NOT commit a real key into values.yaml. Use --set / overlay
   # files / ExternalSecrets.
   anthropicApiKey: ""
+
+# -- Pre-launch HTTP Basic auth gate for the WHOLE app (the neoconto alpha
+# is unpublished). When `basicAuth.enabled: true`, the chart wires
+# `NUCEL_BASIC_AUTH=<user>:<password>` into the server Deployment from a
+# Secret, and the outermost tower middleware in `nucel_server::basic_auth`
+# 401s every request lacking a matching `Authorization: Basic` header
+# (health/metrics paths + kube-probe/ELB-HealthChecker UAs bypass it so
+# probes stay green). Off by default — flip on only for staging/alpha
+# overlays (e.g. neoconto). When disabled, NUCEL_BASIC_AUTH is never set
+# and the gate is transparent.
+basicAuth:
+  enabled: false
+  user: "nucel"
+  # Leave blank in values.yaml; pass via `--set basicAuth.password=...`
+  # so it never lands in git. Ignored when `existingSecret` is set.
+  password: ""
+  # Manage the credential out-of-band: set `existingSecret` to the name of
+  # a Secret in the server namespace holding key `NUCEL_BASIC_AUTH` with
+  # value `user:pass`. The chart then skips rendering its own Secret and
+  # wires the env straight from this one. Matches the marketing site's
+  # existing `nucel-web-basic-auth` shape (rename the key to
+  # NUCEL_BASIC_AUTH, or create a dedicated `nucel-basic-auth` Secret).
+  existingSecret: ""
 
 # -- External Secrets Operator (https://external-secrets.io) integration.
 #
@@ -644,10 +979,13 @@ prometheus:
 # as a follow-up in PRODUCTION_HARDENING.md rather than shipped here.
 autoscaling:
   enabled: false
-  minReplicas: 2
-  maxReplicas: 10
-  targetCPUUtilizationPercentage: 70
-  targetMemoryUtilizationPercentage: 80
+  # Legacy block — kept in sync with the canonical `hpa.*` block below so
+  # operators on either path get the same scale-out targets. New installs
+  # should prefer `hpa.*`. See `hpa.*` for the rationale behind each value.
+  minReplicas: 3
+  maxReplicas: 30
+  targetCPUUtilizationPercentage: 60
+  targetMemoryUtilizationPercentage: 75
   # behavior: optional autoscaling/v2 behavior block (stabilization
   # windows, scaling policies). Empty = controller defaults.
   behavior: {}
@@ -665,3 +1003,326 @@ podDisruptionBudget:
   # Set maxUnavailable instead of minAvailable by leaving minAvailable
   # null and setting this. Only one of the two may be set.
   maxUnavailable: null
+
+# ---------------------------------------------------------------------------
+# Scale hardening (scaling primitives for many-user workloads).
+#
+# These blocks add explicit knobs for the scale-out story. The legacy
+# `autoscaling.*` and `podDisruptionBudget.*` keys above keep working
+# for backwards compat — the templates fall through to them when the
+# new `hpa.*` / `pdb.*` blocks are left at defaults.
+# ---------------------------------------------------------------------------
+
+# -- HorizontalPodAutoscaler knobs (scale-hardening).
+#
+# Off by default so single-replica / homelab installs keep the simple
+# fixed-replica behaviour. When enabled, the HPA takes over replica
+# count from `server.replicas` after the first install.
+#
+# `behavior` controls the scale-up / scale-down cooldown windows. When
+# left empty the template ships sane production defaults:
+#   - scaleUp:   60s stabilization, +100% or +4 pods per 30s
+#   - scaleDown: 300s stabilization, -50% or -2 pods per 60s
+# Override `behavior` to a non-empty map to take full control of the
+# autoscaling/v2 behavior block.
+hpa:
+  enabled: false
+  # Floor raised 2 → 3: with PDB minAvailable:1 and topology spread
+  # across (up to) 3 nodes/zones, a 3-replica floor means a single node
+  # or zone loss still leaves 2 pods serving while the HPA backfills.
+  minReplicas: 3
+  # Ceiling raised 10 → 30 for the "a lot more users" target. Each pod is
+  # capped at 1 CPU / 1Gi (server.resources.limits), so 30 replicas is
+  # ~30 vCPU / ~30Gi of server capacity — comfortably inside the
+  # arm64-general NodePool limit (100 CPU / 200Gi). Bump again only after
+  # confirming the SurrealDB/TiKV tier and the bg_job runner keep up
+  # (watch nucel_bg_job_claim_latency p99 + queue depth on the dashboard).
+  maxReplicas: 30
+  # CPU target lowered 70 → 60. nucel-server has bursty request handlers
+  # (argon2 on signup, libgit2 upload-pack, registry blob streaming) that
+  # spike a pod's CPU fast; scaling out at 60% average leaves headroom to
+  # absorb the spike during the ~60s it takes a new pod to become ready,
+  # rather than saturating at 70% and tail-latency-ing the in-flight
+  # requests.
+  targetCPUUtilizationPercentage: 60
+  # Memory target held at 75. The Rust server's RSS is fairly flat
+  # (no large per-request allocations on the steady-state read paths),
+  # so memory is a guard-rail rather than the primary scaling signal —
+  # CPU drives scale-out first in practice.
+  targetMemoryUtilizationPercentage: 75
+  # behavior left at the template defaults (snappy 60s scale-up / cautious
+  # 300s scale-down). The +100%/+4-pods-per-30s scale-up policy matters
+  # more now that maxReplicas is 30: a traffic spike can double the fleet
+  # every 30s instead of crawling up one pod at a time.
+  behavior: {}
+
+# -- PodDisruptionBudget knobs (scale-hardening).
+#
+# On by default with `minAvailable: 1` so voluntary disruptions (node
+# drain, cluster upgrade, Karpenter consolidation) can't take the
+# service fully down. Pair with `server.replicas >= 2` OR
+# `hpa.enabled: true` (which defaults to `minReplicas: 2`) — otherwise
+# the PDB will block drains entirely.
+pdb:
+  enabled: true
+  minAvailable: 1
+  # Set maxUnavailable instead of minAvailable by leaving minAvailable
+  # null and setting this. Only one of the two may be set.
+  maxUnavailable: null
+
+# -- Optional cluster-scoped PriorityClass resources for nucel pods.
+#
+# Off by default because PriorityClass is cluster-scoped and can
+# collide across installs in multi-tenant clusters. Enable when you
+# want strict eviction ordering for nucel workloads during node
+# pressure (and set `server.priorityClassName: nucel-system` etc. on
+# the per-component blocks above).
+priorityClass:
+  create: false
+  system:
+    enabled: true
+    name: nucel-system
+    value: 1000000
+    preemptionPolicy: PreemptLowerPriority
+    description: "High-priority class for nucel control-plane pods (nucel-server)."
+  workload:
+    enabled: true
+    name: nucel-workload
+    value: 100000
+    preemptionPolicy: PreemptLowerPriority
+    description: "Medium-priority class for nucel background workloads (workers, seed jobs)."
+
+# -- Default resource requests / limits applied to the main server
+# Deployment when `server.resources` is left at its defaults.
+#
+# These mirror the recommended starting point for production:
+#   requests: 250m CPU / 512Mi memory
+#   limits:   1    CPU / 1Gi    memory
+#
+# The chart's deployment.yaml already wires `.Values.server.resources`
+# into the container spec; override the `server.resources` block above
+# to pick these values up across all server pods.
+resourcesDefaults:
+  server:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+# -- Pod topology spread constraints for the main server Deployment.
+#
+# Spreads pods across nodes and (when running on a multi-zone cluster)
+# zones so a single node or zone failure doesn't take a disproportionate
+# share of capacity down. Leave the list empty to opt out.
+#
+# These are wired through `server.topologySpreadConstraints` (the chart
+# templates pick the value up automatically when present); set
+# `server.topologySpreadConstraints: []` to disable.
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: nucel
+        app.kubernetes.io/component: server
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: nucel
+        app.kubernetes.io/component: server
+
+# -- Default affinity for the main server Deployment.
+#
+# Preferred (soft) pod anti-affinity on hostname — the scheduler will
+# try to spread server replicas across different nodes, but won't block
+# scheduling when only one node is available (e.g. single-node clusters,
+# rolling node replacement). Pair with `topologySpreadConstraints` for
+# a belt-and-braces spread strategy.
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: nucel
+              app.kubernetes.io/component: server
+
+# -- Default priorityClassName for the main server Deployment.
+#
+# Empty by default. Set to "nucel-system" (or whatever name you
+# configured under `priorityClass.system.name`) after enabling
+# `priorityClass.create: true`.
+priorityClassName: ""
+
+# ────────────────────────────────────────────────────────────────────────────
+# Metrics — observability launch pack (RPS, latency, pipelines, agent cost).
+#
+# This block is the user-facing shorthand for the platform-wide
+# Prometheus + Grafana story. It does NOT replace `prometheus.*` above
+# (which still owns the ServiceMonitor + PrometheusRule templates). The
+# two coexist because:
+#
+#   - `prometheus.serviceMonitor` predates this block and is what
+#     production overlays already set; renaming it would be a breaking
+#     value-schema change for existing installs.
+#   - `metrics.*` mirrors the same flags under a friendlier name and
+#     documents the on-by-default launch defaults. Helm templates read
+#     either one (see chart README / PRODUCTION_HARDENING.md).
+#
+# The Rust server itself always emits Prometheus metrics — `enabled`
+# below is about the *kubernetes wiring* (ServiceMonitor, scrape, etc.),
+# not the `/metrics` handler.
+metrics:
+  # Master switch. Off keeps the chart inert (no ServiceMonitor, no
+  # documentation hints); on is the recommended launch config.
+  enabled: true
+  # When true, mounts /metrics on the public Service path so anything
+  # that can reach the ingress can hit it. Default false: scrape via
+  # the in-cluster Service only. Pair with `secrets.metricsToken` to
+  # enforce bearer auth if you flip this on.
+  publicEndpoint: false
+  serviceMonitor:
+    # Mirrors `prometheus.serviceMonitor.enabled`. The actual CRD is
+    # rendered from `templates/servicemonitor.yaml`, which reads the
+    # `prometheus.*` keys today — operators flipping THIS flag should
+    # also set `prometheus.serviceMonitor.enabled=true`. A follow-up
+    # commit will unify both under `metrics.*` once existing overlays
+    # are migrated.
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 10s
+  # Grafana dashboard ConfigMap (templates/grafana-dashboard.yaml).
+  #
+  # When enabled, the chart ships a ConfigMap holding the
+  # `dashboards/nucel-server-overview.json` dashboard, labelled for
+  # auto-discovery by the kube-prometheus-stack Grafana sidecar. It is
+  # ADDITIVE — it does not touch any hand-built dashboards. Off by
+  # default so the chart still renders on clusters without a Grafana
+  # sidecar (a plain ConfigMap is harmless there, but we keep the launch
+  # surface opt-in for parity with the other metrics.* toggles).
+  grafanaDashboard:
+    enabled: false
+    # Label the Grafana sidecar selects on. kube-prometheus-stack's
+    # default is `grafana_dashboard`. Override if your sidecar uses a
+    # custom LABEL (e.g. `grafana_dashboard: enabled`).
+    sidecarLabel: grafana_dashboard
+    # Grafana folder the dashboard is filed under (sidecar
+    # FOLDER_ANNOTATION). Empty falls back to "Nucel".
+    folder: "Nucel"
+    # Extra labels on the dashboard ConfigMap.
+    labels: {}
+
+  # -- Production SLO + health alerts (templates/prometheusrule.yaml).
+  #
+  # This is the platform-wide alerting layer — RED signals, SLO-breach
+  # alerts, dependency health, and the k8s failure modes that should
+  # page or ticket an operator. It is SEPARATE from (and additive to)
+  # `prometheus.alerts.*`, which keeps the original bg_job-only
+  # PrometheusRule for back-compat with existing overlays.
+  #
+  # Off by default: rendering a PrometheusRule requires the Prometheus
+  # Operator CRD (`monitoring.coreos.com/v1`), which only exists where
+  # kube-prometheus-stack is installed. Turn this on in any environment
+  # running the operator, alongside `metrics.serviceMonitor.enabled`
+  # (the rules evaluate against an empty time-series without a scrape).
+  #
+  # Severity → routing convention (see docs/runbooks/slos.md):
+  #   severity: critical  → page (PagerDuty / on-call)
+  #   severity: warning   → ticket (Slack / issue tracker)
+  alerts:
+    enabled: false
+    # Extra labels on the PrometheusRule resource — useful when your
+    # operator's `ruleSelector` matches on a label
+    # (e.g. `release: kube-prometheus-stack`) or for alert routing.
+    #   labels:
+    #     release: kube-prometheus-stack
+    labels: {}
+
+    # All alert thresholds live here so operators tune the noise floor
+    # per environment without editing the template. Defaults track the
+    # load/PLAN_1M.md §4 SLO numbers.
+    thresholds:
+      # HTTP — fraction of all responses that are 5xx before paging.
+      http5xxRatio: 0.01
+      # Global availability SLO target + multi-window burn-rate factor
+      # for the fast-burn page (14.4x of a 30-day budget ≈ exhausted in
+      # ~2 days). target 0.999 = 99.9% availability.
+      availabilityTarget: 0.999
+      availabilityBudgetBurn: 14.4
+      # Web/API p99 latency SLO (seconds). PLAN_1M §4 web-browse p99.
+      webP99Seconds: 1.5
+      # bg_job: pending rows per kind before a depth alert; the
+      # "queue non-empty but stalled" floor; claim p99 budget (s).
+      bgJobPendingDepth: 5000
+      bgJobStallDepth: 100
+      bgJobClaimP99Seconds: 0.5
+      # SurrealDB query p99 budget (seconds).
+      dbQueryP99Seconds: 0.5
+      # SSE leak guard (#281): floor above which a monotonically-rising
+      # open-connection count is treated as a leak.
+      sseLeakFloor: 500
+      # Registry blob op p99 budget (seconds) — CI image-pull hot path.
+      registryBlobP99Seconds: 10
+      # Platform: restarts-in-15min that count as crash-looping; PVC
+      # used/capacity ratio that counts as near-full.
+      crashLoopRestarts: 3
+      pvcUsedRatio: 0.85
+
+    # TLS cert-expiry alert. OFF by default — only fires where
+    # cert-manager is scraped (it exports
+    # `certmanager_certificate_expiration_timestamp_seconds`). Installs
+    # that terminate TLS at the ALB via ACM don't have this metric.
+    certExpiry:
+      enabled: false
+      warnDays: 14
+
+    # Backup-freshness alert. OFF by default — coordinates with the
+    # DocumentDB/SurrealDB backup work, which must export a
+    # "last successful backup" unix-timestamp gauge. Configure the
+    # metric name the backup pipeline emits and the staleness budget.
+    backup:
+      enabled: false
+      metricName: "nucel_backup_last_success_timestamp_seconds"
+      maxAgeHours: 26
+
+    # -- Alertmanager routing reference (NOT rendered by this chart).
+    #
+    # The chart deliberately does NOT template an Alertmanager config —
+    # Alertmanager is cluster-wide (one per kube-prometheus-stack
+    # release) and owning it from an app chart would clobber other
+    # teams' routes. This block is a documented, copy-paste reference for
+    # the `alertmanager.config` of your kube-prometheus-stack values.
+    # Webhooks / keys are placeholders — supply them via your own Secret
+    # (e.g. `alertmanager.alertmanagerSpec.secrets`), never hardcoded.
+    #
+    # Severity → channel mapping matches the convention above:
+    #   critical → page (PagerDuty)   warning → ticket (Slack)
+    #
+    #   alertmanagerRouting:
+    #     route:
+    #       group_by: ["alertname", "namespace"]
+    #       receiver: nucel-slack-tickets   # default = ticket
+    #       routes:
+    #         - matchers: ['severity = "critical"']
+    #           receiver: nucel-pagerduty
+    #           continue: true
+    #         - matchers: ['severity = "warning"']
+    #           receiver: nucel-slack-tickets
+    #     receivers:
+    #       - name: nucel-pagerduty
+    #         pagerduty_configs:
+    #           - routing_key_file: /etc/alertmanager/secrets/pagerduty/key
+    #             severity: critical
+    #       - name: nucel-slack-tickets
+    #         slack_configs:
+    #           - api_url_file: /etc/alertmanager/secrets/slack/webhook
+    #             channel: "#nucel-alerts"
+    #             send_resolved: true
+    alertmanagerRouting: {}

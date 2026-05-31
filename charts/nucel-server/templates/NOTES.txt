@@ -1,0 +1,44 @@
+nucel-server {{ .Chart.AppVersion }} (chart {{ .Chart.Version }}) deployed to namespace "{{ include "nucel.namespace" . }}".
+
+{{- $replicas := int (default 1 .Values.server.replicas) }}
+{{- $hpaOn := or (and .Values.hpa .Values.hpa.enabled) (and .Values.autoscaling .Values.autoscaling.enabled) }}
+{{- $multi := or (gt $replicas 1) $hpaOn }}
+
+Storage strategy (#236 / #244)
+──────────────────────────────
+  pages          : {{ include "nucel.storage.backend" (dict "ctx" $ "class" "pages") }}
+  registry       : {{ include "nucel.storage.backend" (dict "ctx" $ "class" "registry") }}
+  npm            : {{ include "nucel.storage.backend" (dict "ctx" $ "class" "npm") }}
+  artifacts      : {{ include "nucel.storage.backend" (dict "ctx" $ "class" "artifacts") }}
+  gitWorkspaces  : {{ include "nucel.storage.backend" (dict "ctx" $ "class" "gitWorkspaces") }} (local PVC hot cache always present)
+
+{{- if $multi }}
+
+  Running MULTI-REPLICA (server.replicas={{ $replicas }}{{ if $hpaOn }}, HPA enabled{{ end }}).
+
+  For multi-replica each shared data class (pages / registry / npm / artifacts)
+  MUST be reachable from every pod. The chart has validated your config and
+  refused to deploy a ReadWriteOnce PVC or emptyDir on a shared class (that is
+  the Multi-Attach / 404-race bug in #244). Recommended:
+
+    * pages     → storage.classes.pages.backend=s3   (object storage, IRSA)
+    * registry  → storage.classes.registry.accessMode=ReadWriteMany (EFS/NFS)
+    * npm       → storage.classes.npm.accessMode=ReadWriteMany
+    * artifacts → storage.classes.artifacts.accessMode=ReadWriteMany
+
+  registry / npm / artifacts are filesystem-only in the binary today, so S3 is
+  NOT yet an option for them — use a ReadWriteMany StorageClass.
+{{- else }}
+
+  Running SINGLE-REPLICA (server.replicas=1, HPA off). ReadWriteOnce PVCs and
+  emptyDir are fine here. Before scaling out, switch shared classes to S3
+  (pages) or ReadWriteMany PVCs (registry / npm / artifacts) — see
+  values.yaml `storage.classes.*` and the chart README.
+{{- end }}
+
+{{- if eq (include "nucel.storage.backend" (dict "ctx" $ "class" "pages")) "s3" }}
+
+  Pages backend = s3. Ensure the server can authenticate to the bucket via
+  IRSA (set serviceAccount.annotations: eks.amazonaws.com/role-arn) or via the
+  static keys under storage.classes.pages.s3.* / repoStorage.s3.*.
+{{- end }}

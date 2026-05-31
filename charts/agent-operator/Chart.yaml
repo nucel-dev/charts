@@ -2,7 +2,7 @@ apiVersion: v2
 name: agent-operator
 description: Kubernetes operator that drives AI agents to autonomously resolve issues — connect any GitHub repo + Paperclip board, get PRs from an AI team.
 type: application
-version: 0.1.0
+version: 0.2.0
 appVersion: "0.1.0"
 home: https://nucel.dev
 sources:

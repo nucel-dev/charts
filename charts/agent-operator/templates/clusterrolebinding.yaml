@@ -1,30 +1,32 @@
 ---
-# Operator ClusterRoleBinding
+# Operator RoleBinding (namespace-scoped)
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: {{ include "agent-operator.fullname" . }}
+  namespace: {{ include "agent-operator.namespace" . }}
   labels:
     {{- include "agent-operator.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
+  kind: Role
   name: {{ include "agent-operator.fullname" . }}
 subjects:
   - kind: ServiceAccount
     name: {{ include "agent-operator.fullname" . }}
     namespace: {{ include "agent-operator.namespace" . }}
 ---
-# Webhook ClusterRoleBinding
+# Webhook RoleBinding (namespace-scoped)
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: {{ include "agent-operator.fullname" . }}-webhook
+  namespace: {{ include "agent-operator.namespace" . }}
   labels:
     {{- include "agent-operator.webhookLabels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
+  kind: Role
   name: {{ include "agent-operator.fullname" . }}-webhook
 subjects:
   - kind: ServiceAccount

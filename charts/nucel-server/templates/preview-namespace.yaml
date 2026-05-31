@@ -1,0 +1,30 @@
+{{- $previewEnv := default dict .Values.previewEnv -}}
+{{- $previewEnabled := default false $previewEnv.enabled -}}
+{{- $previewNamespace := default "nucel-previews" $previewEnv.namespace -}}
+{{- $previewDomain := default "nucel.neoconto.com" $previewEnv.domainSuffix -}}
+{{- if $previewEnabled }}
+# Per-PR preview environments namespace.
+#
+# Preview pods live here, *not* in `.Values.ciNamespace` — keeps the
+# preview pods (which exec branch code) from sharing RBAC or network
+# policy with the AW / CI runner pods. The chart only owns the
+# namespace; the cluster wildcard ingress for `*.nucel.neoconto.com`
+# (provisioned by the Pages stack) routes preview-{pr_short_id} hosts
+# into this namespace via the operator's per-pod Service+Ingress
+# reconciler.
+#
+# Defaults applied via Helm `default` so this template renders even
+# when values.yaml hasn't been extended with a `previewEnv:` block
+# yet (values.yaml is locked for this slice — a follow-up commit
+# will add the block + flip enabled to true in the env overlay).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $previewNamespace | quote }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+    nucel.io/purpose: preview-envs
+  annotations:
+    nucel.io/managed-by: nucel-server
+    nucel.io/wildcard-domain: {{ $previewDomain | quote }}
+{{- end }}

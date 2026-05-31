@@ -1,3 +1,7 @@
+{{- /* #244 — fail-fast on a storage topology that breaks multi-replica
+       (RWO PVC or emptyDir on a shared class with replicas > 1 / HPA, or
+       backend=s3 on an FS-only class). See _helpers.tpl. */ -}}
+{{- include "nucel.storage.validate" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -10,6 +14,10 @@ metadata:
     checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
 spec:
   replicas: {{ .Values.server.replicas }}
+  {{- with .Values.server.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "nucel.selectorLabels" . | nindent 6 }}
@@ -24,10 +32,31 @@ spec:
         app.kubernetes.io/component: server
     spec:
       serviceAccountName: {{ include "nucel.serviceAccountName" . }}
+      {{- include "nucel.podSecurityContext" . | nindent 6 }}
+      {{- with .Values.server.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
       containers:
         - name: server
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "nucel.containerSecurityContext" . | nindent 10 }}
           ports:
             - containerPort: {{ .Values.server.port }}
               name: http
@@ -77,6 +106,18 @@ spec:
                   name: {{ include "nucel.secretName" . }}
                   key: NUCEL_OIDC_PRIVATE_KEY
                   optional: true
+            # B-15 -- shared session cookie signing key. `optional: true`
+            # so the pod still boots in dev overlays where the server
+            # falls back to the deterministic dev key (when
+            # NUCEL_ALLOW_DEV_SECRETS=1 is also set). In production the
+            # chart-managed Secret always populates this -- see
+            # templates/secret.yaml (lookup + randAlphaNum + required).
+            - name: NUCEL_SESSION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" . }}
+                  key: NUCEL_SESSION_KEY
+                  optional: true
             # Metrics bearer token (Fix H9 — required when
             # prometheus.requireAuth=true). `optional: true` so the pod
             # still boots in dev overlays that disable the requirement.
@@ -114,6 +155,29 @@ spec:
                   name: {{ include "nucel.secretName" . }}
                   key: NUCEL_GIT_PASSWORD
                   optional: true
+            # MVP audit L11 — SMTP URL from the email Secret.
+            # `optional: true` so the pod still boots when email is
+            # unconfigured (e.g. preview environments); EmailSender's
+            # no-op branch logs a warning per send in that case.
+            - name: NUCEL_SMTP_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.fullname" . }}-email
+                  key: NUCEL_SMTP_URL
+                  optional: true
+            {{- /* Pre-launch HTTP Basic auth gate for the whole alpha.
+                   Wired only when basicAuth.enabled — when off, the env
+                   is never set so the gate middleware is transparent.
+                   Source Secret: chart-managed `<fullname>-basic-auth`
+                   (rendered in basic-auth-secret.yaml) or an operator's
+                   existingSecret. Both carry key NUCEL_BASIC_AUTH=user:pass. */}}
+            {{- if and .Values.basicAuth .Values.basicAuth.enabled }}
+            - name: NUCEL_BASIC_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.basicAuth.existingSecret | default (printf "%s-basic-auth" (include "nucel.fullname" .)) }}
+                  key: NUCEL_BASIC_AUTH
+            {{- end }}
             # Fix C9 — SSH host key path. Always set; the file mount
             # under `volumes` below is gated on `secrets.sshHostKey`
             # being non-empty (or being provided via ExternalSecrets).
@@ -169,41 +233,99 @@ spec:
               mountPath: /data/npm
             - name: workspaces
               mountPath: /data/workspaces
+            {{- /* #244 — pages assets. In fs/pvc/emptyDir mode the server
+                   writes to /data/pages; before this fix nothing was
+                   mounted there, so assets landed on the ephemeral
+                   container layer (wiped on pod cycle, invisible to
+                   siblings). When the pages backend is `s3` the server
+                   writes straight to object storage and this mount is
+                   skipped. */}}
+            {{- if ne (include "nucel.storage.backend" (dict "ctx" $ "class" "pages")) "s3" }}
+            - name: pages
+              mountPath: /data/pages
+            {{- end }}
             # Fix C9 — SSH host key file. Volume is `optional: true`
             # so the pod still boots when the key isn't set (server
             # falls back to ephemeral + logs a warning).
             - name: ssh-host-key
               mountPath: /etc/nucel/ssh-host-key
               readOnly: true
+          {{- $probes := default (dict) .Values.server.probes }}
+          {{- $startup := default (dict) $probes.startup }}
+          {{- if $startup.enabled }}
+          # Slow-boot gate — liveness is not evaluated until this passes,
+          # so a cold-start (DB connect + schema check + SSH host key) is
+          # never misread as a crash-loop.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: {{ $startup.periodSeconds | default 5 }}
+            failureThreshold: {{ $startup.failureThreshold | default 30 }}
+            timeoutSeconds: {{ $startup.timeoutSeconds | default 3 }}
+          {{- end }}
+          {{- $liveness := default (dict) $probes.liveness }}
           livenessProbe:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 10
-            periodSeconds: 30
+            initialDelaySeconds: {{ $liveness.initialDelaySeconds | default 10 }}
+            periodSeconds: {{ $liveness.periodSeconds | default 30 }}
+            timeoutSeconds: {{ $liveness.timeoutSeconds | default 3 }}
+            failureThreshold: {{ $liveness.failureThreshold | default 3 }}
+          {{- $readiness := default (dict) $probes.readiness }}
           readinessProbe:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            initialDelaySeconds: {{ $readiness.initialDelaySeconds | default 5 }}
+            periodSeconds: {{ $readiness.periodSeconds | default 10 }}
+            timeoutSeconds: {{ $readiness.timeoutSeconds | default 3 }}
+            failureThreshold: {{ $readiness.failureThreshold | default 3 }}
           resources:
             {{- toYaml .Values.server.resources | nindent 12 }}
       volumes:
+        {{- /* #236 / #244 — each data-class volume is rendered from its
+               resolved backend. `gitWorkspaces` (repos) and `artifacts`
+               (ci-data) always keep a PVC for the local hot path; their
+               s3 backend is a cold tier layered on top. registry / npm /
+               artifacts / pages honor pvc vs emptyDir per class. */}}
         - name: repos
           persistentVolumeClaim:
-            claimName: nucel-repos
+            claimName: {{ include "nucel.storage.pvcName" (dict "class" "gitWorkspaces") }}
         - name: ci-data
           persistentVolumeClaim:
-            claimName: nucel-ci-data
+            claimName: {{ include "nucel.storage.pvcName" (dict "class" "artifacts") }}
+        {{- $registryBackend := include "nucel.storage.backend" (dict "ctx" $ "class" "registry") }}
         - name: registry
+          {{- if eq $registryBackend "emptyDir" }}
+          emptyDir: {}
+          {{- else }}
           persistentVolumeClaim:
-            claimName: nucel-registry
+            claimName: {{ include "nucel.storage.pvcName" (dict "class" "registry") }}
+          {{- end }}
+        {{- $npmBackend := include "nucel.storage.backend" (dict "ctx" $ "class" "npm") }}
         - name: npm
+          {{- if eq $npmBackend "emptyDir" }}
+          emptyDir: {}
+          {{- else }}
           persistentVolumeClaim:
-            claimName: nucel-npm
+            claimName: {{ include "nucel.storage.pvcName" (dict "class" "npm") }}
+          {{- end }}
         - name: workspaces
           emptyDir: {}
+        {{- /* pages volume — only present when the backend is NOT s3
+               (matches the conditional mount above). */}}
+        {{- $pagesBackend := include "nucel.storage.backend" (dict "ctx" $ "class" "pages") }}
+        {{- if ne $pagesBackend "s3" }}
+        - name: pages
+          {{- if eq $pagesBackend "pvc" }}
+          persistentVolumeClaim:
+            claimName: {{ include "nucel.storage.pvcName" (dict "class" "pages") }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
         # Fix C9 — SSH host key file projection. The Secret key
         # `NUCEL_SSH_HOST_KEY` is exposed as a file at
         # /etc/nucel/ssh-host-key/NUCEL_SSH_HOST_KEY (matches the env

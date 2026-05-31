@@ -53,7 +53,7 @@ Renders the following resources by default:
 | `Secret` (chart-managed) | `NUCEL_DB_PASS`, OIDC key, SSH host key, metrics token, OpenRouter key, Anthropic key, git-bot creds, S3 creds | `secrets.create` |
 | `Secret nucel-ci-runner-secret` | runner token + API URL for `nucel-ci-operator` | `ciOperator.enabled` |
 | `Secret nucel-aw-anthropic` | `ANTHROPIC_API_KEY` mounted into AW runner Pods | `secrets.anthropicApiKey` set |
-| `PersistentVolumeClaim` (×4) | `nucel-repos`, `nucel-ci-data`, `nucel-registry`, `nucel-npm` (RWO) | always |
+| `PersistentVolumeClaim` (up to ×5) | `nucel-repos`, `nucel-ci-data`, `nucel-registry`, `nucel-npm`, `nucel-pages` — one per data class whose `storage.classes.<class>.backend=pvc` (default RWO; set `accessMode: ReadWriteMany` for multi-replica) | `storage.classes.*` |
 | `ServiceAccount` | IRSA-ready (annotate with `eks.amazonaws.com/role-arn`) | `serviceAccount.create` |
 | `ClusterRole` + `ClusterRoleBinding` | permissions for the in-process job runner to create AW K8s Jobs | always |
 | `Ingress` | controller-agnostic (ALB / nginx) — see `ingress.annotations` | `ingress.enabled` |
@@ -178,6 +178,7 @@ These are enforced by Helm's `required` template function — `helm install/upgr
 | Key | Env var | Gated by | Generate with |
 |---|---|---|---|
 | `secrets.oidcPrivateKey` | `NUCEL_OIDC_PRIVATE_KEY` | `secrets.create=true` AND `secrets.requireProductionValues=true` (default) | `openssl genpkey -algorithm ED25519` |
+| `secrets.sessionKey` | `NUCEL_SESSION_KEY` | `secrets.create=true` AND `secrets.requireProductionValues=true` (default) — B-15: cookie signing key shared across replicas | `openssl rand -hex 64` |
 | `secrets.metricsToken` | `NUCEL_METRICS_TOKEN` | `prometheus.requireAuth=true` (default) | `openssl rand -base64 32` |
 | `externalSecrets.secretStoreRef.name` | — | `externalSecrets.enabled=true` | name of your `ClusterSecretStore` |
 | `externalSecrets.remoteRef.key` | — | `externalSecrets.enabled=true` | remote key whose JSON payload holds every `NUCEL_*` value |
@@ -203,6 +204,7 @@ openssl rand -base64 32 > /tmp/nucel-metrics.token
 
 helm upgrade --install nucel ./charts/nucel-server \
   --set-file secrets.oidcPrivateKey=/tmp/nucel-oidc.key \
+  --set secrets.sessionKey="$(openssl rand -hex 64)" \
   --set-file secrets.sshHostKey=/tmp/nucel-ssh-host \
   --set-file secrets.metricsToken=/tmp/nucel-metrics.token \
   --set secrets.dbPass="$(openssl rand -hex 32)" \
@@ -293,6 +295,44 @@ reading the values file.
 | `storage.storageClassName` | `""` | **EKS: set to `gp3`** with `WaitForFirstConsumer` |
 | `repoStorage.kind` | `local` | `local` keeps repos on the PVC; `s3` enables a cold tier on object storage |
 | `repoStorage.s3.*` | — | bucket / prefix / region / endpoint; prefer IRSA over `accessKeyId`/`secretAccessKey` |
+
+#### Per-data-class storage strategy (`storage.classes.*`) — multi-replica fix (#236 / #244)
+
+Each data class picks a backend independently. Leaving `storage.classes`
+unset preserves the legacy single-replica behaviour (RWO PVCs + pages on an
+emptyDir volume).
+
+| Class | `backend` options | Multi-replica recommendation |
+|---|---|---|
+| `pages` | `s3` \| `pvc` \| `emptyDir` | **`s3`** (object storage, IRSA) — every replica serves identical bytes |
+| `registry` | `pvc` \| `emptyDir` | `pvc` + `accessMode: ReadWriteMany` (EFS/NFS/CephFS) — binary is FS-only, no S3 yet |
+| `npm` | `pvc` \| `emptyDir` | `pvc` + `ReadWriteMany` |
+| `artifacts` | `pvc` \| `emptyDir` | `pvc` + `ReadWriteMany` (CI logs + artifacts) |
+| `gitWorkspaces` | `pvc` \| `s3` | `pvc` + `ReadWriteMany` hot cache; `s3` adds a cold tier on top |
+| `workspaces` | `emptyDir` | `emptyDir` (per-run CI scratch) |
+
+Per-class keys: `backend`, `size`, `accessMode` (`ReadWriteOnce` |
+`ReadWriteMany`), `storageClassName`, and (for `pages` / `gitWorkspaces`)
+`s3.{bucket,prefix,region,endpoint,accessKeyId,secretAccessKey}`. Empty
+pages/repos `s3.*` fields fall back to `repoStorage.s3.*` (shared bucket,
+different prefix).
+
+**The bug this fixes (#244):** Pages assets were written to the container's
+ephemeral filesystem (never mounted), so they were wiped on every pod cycle
+and invisible to sibling replicas (50% 404 race). The registry/npm/artifact
+PVCs were `ReadWriteOnce`, which cannot attach to more than one pod →
+Multi-Attach errors under HPA / `replicas > 1`. The chart now mounts a `pages`
+volume and lets you move shared classes to S3 / RWX.
+
+**RWO + multi-replica is now guarded.** `nucel.storage.validate` runs at
+template time and **fails `helm install/upgrade`** when `server.replicas > 1`
+(or HPA is enabled) is paired with a `ReadWriteOnce` PVC or `emptyDir` on any
+shared class (`pages`, `registry`, `npm`, `artifacts`, `gitWorkspaces`). It
+also rejects `backend: s3` on a filesystem-only class. To deploy
+multi-replica you must explicitly choose `s3` (pages) or `ReadWriteMany`
+(everything else), or pin `server.replicas: 1`. See
+`values-production.yaml` for the recommended config (pages → S3 via IRSA,
+registry/npm/artifacts/gitWorkspaces → EFS `ReadWriteMany`).
 
 ### Ingress
 

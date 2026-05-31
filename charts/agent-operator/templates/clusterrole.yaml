@@ -1,15 +1,27 @@
 ---
-# Operator ClusterRole
+# Operator Role (namespace-scoped — least privilege).
+#
+# The operator only acts within its own namespace: it watches namespaced
+# AgentTask/PrReviewTask CRDs and creates Jobs/Pods/Events/ConfigMaps in the
+# same namespace. A namespace Role (not a ClusterRole) is therefore
+# sufficient and caps the blast radius of a compromised SA token.
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
   name: {{ include "agent-operator.fullname" . }}
+  namespace: {{ include "agent-operator.namespace" . }}
   labels:
     {{- include "agent-operator.labels" . | nindent 4 }}
 rules:
-  # AgentTask CRD management
+  # AgentTask + PrReviewTask CRD management
   - apiGroups: ["agenttask.io"]
-    resources: ["agenttasks", "agenttasks/status", "agenttasks/finalizers"]
+    resources:
+      - "agenttasks"
+      - "agenttasks/status"
+      - "agenttasks/finalizers"
+      - "prreviewtasks"
+      - "prreviewtasks/status"
+      - "prreviewtasks/finalizers"
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Job management (spawn worker Jobs, clean up after completion)
   - apiGroups: ["batch"]
@@ -23,19 +35,26 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
-  # ConfigMap reads (per-repo config, operator config)
+  # ConfigMaps: read per-repo/operator config AND read/write the durable budget
+  # ledger ConfigMap so per-repo spend survives operator restarts.
   - apiGroups: [""]
     resources: ["configmaps"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # Leader election via coordination.k8s.io Lease — only one replica reconciles
+  # at a time, making the operator safe to run HA / scaled > 1.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
 ---
-# Webhook ClusterRole
+# Webhook Role (namespace-scoped)
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
   name: {{ include "agent-operator.fullname" . }}-webhook
+  namespace: {{ include "agent-operator.namespace" . }}
   labels:
     {{- include "agent-operator.webhookLabels" . | nindent 4 }}
 rules:
   - apiGroups: ["agenttask.io"]
-    resources: ["agenttasks"]
+    resources: ["agenttasks", "prreviewtasks"]
     verbs: ["get", "list", "create"]

@@ -1,0 +1,382 @@
+{{- if and .Values.metrics .Values.metrics.alerts .Values.metrics.alerts.enabled }}
+{{- $a := .Values.metrics.alerts }}
+{{- $t := $a.thresholds | default dict }}
+# ---------------------------------------------------------------------------
+# Platform-wide PrometheusRule (production SLO + health alerts).
+#
+# This is the "real alerting" layer for a 1M-user install — it goes
+# BEYOND the bg_job-only rules in `prometheus-rules.yaml` (which stay as
+# they are for back-compat under `prometheus.alerts.*`). It covers the
+# RED signals, SLO breaches, dependency health, and the k8s/platform
+# failure modes that should page or ticket an operator.
+#
+# Gated behind `metrics.alerts.enabled` (default false) so the chart
+# still renders on clusters without the Prometheus Operator — the
+# `monitoring.coreos.com/v1` CRD only exists where kube-prometheus-stack
+# (or another operator) is installed. Requires the ServiceMonitor
+# (`metrics.serviceMonitor.enabled` / `prometheus.serviceMonitor.enabled`)
+# so these rules evaluate against a populated time-series.
+#
+# Every threshold is a value (`metrics.alerts.thresholds.*`) so operators
+# tune the noise floor per environment without editing templates. The
+# SLO targets default to the load/PLAN_1M.md §4 numbers.
+#
+# Severity convention (see docs/runbooks/slos.md for routing):
+#   severity: critical  → page (PagerDuty / on-call)
+#   severity: warning   → ticket (Slack / issue tracker)
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "nucel.fullname" . }}-slo
+  namespace: {{ include "nucel.namespace" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+    {{- with $a.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    # ───────────────────────── HTTP RED / SLO ─────────────────────────
+    - name: nucel-http-slo
+      interval: 30s
+      rules:
+        # High 5xx rate across the whole router. 5xx is ALWAYS a failure
+        # per PLAN_1M §4 ("a 5xx is always a failure"). Ratio of 5xx to
+        # all responses over 5m; pages when sustained.
+        - alert: NucelHttp5xxRateHigh
+          expr: |
+            (
+              sum(rate(nucel_http_requests_total{status=~"5.."}[5m]))
+              /
+              clamp_min(sum(rate(nucel_http_requests_total[5m])), 1)
+            ) > {{ $t.http5xxRatio | default 0.01 }}
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "HTTP 5xx ratio above {{ $t.http5xxRatio | default 0.01 }}"
+            description: |
+              The server is returning 5xx for more than
+              {{ $t.http5xxRatio | default 0.01 }} of all requests over 5min.
+              Per PLAN_1M §4 a 5xx is always a failure. Check pod logs, DB
+              health, and the per-route breakdown in the Grafana SLO row.
+
+        # Error-budget burn on the global 99.9% availability SLO. A fast
+        # 14.4x burn over 1h exhausts a 30-day budget in ~2 days — page.
+        - alert: NucelAvailabilityBudgetFastBurn
+          expr: |
+            (
+              sum(rate(nucel_http_requests_total{status=~"5.."}[1h]))
+              /
+              clamp_min(sum(rate(nucel_http_requests_total[1h])), 1)
+            ) > ({{ $t.availabilityBudgetBurn | default 14.4 }} * (1 - {{ $t.availabilityTarget | default 0.999 }}))
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Availability error-budget burning fast (>{{ $t.availabilityBudgetBurn | default 14.4 }}x)"
+            description: |
+              The 1h 5xx ratio is burning the 30-day availability error budget
+              (target {{ $t.availabilityTarget | default 0.999 }}) at more than
+              {{ $t.availabilityBudgetBurn | default 14.4 }}x. At this rate the
+              budget is gone in ~2 days. See docs/runbooks/slos.md.
+
+        # Web-browse (Inertia) p99 latency SLO breach — PLAN_1M §4: < 1.5s.
+        # Catches the 504 regressions (#281, B-1) creeping back.
+        - alert: NucelWebP99LatencySloBreach
+          expr: |
+            histogram_quantile(
+              0.99,
+              sum by (le) (rate(nucel_http_request_duration_seconds_bucket{route!~"/@.*|.*\\.git.*|/v2/.*"}[5m]))
+            ) > {{ $t.webP99Seconds | default 1.5 }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Web/API p99 latency above SLO ({{ $t.webP99Seconds | default 1.5 }}s)"
+            description: |
+              p99 request latency for the web/API surface has been above the
+              PLAN_1M §4 SLO of {{ $t.webP99Seconds | default 1.5 }}s for >10min.
+              p99 is set well under the gateway timeout to guard the #281 / B-1
+              504 regression. Check DB latency + pod CPU.
+
+    # ─────────────────────────── bg_job queue ───────────────────────────
+    - name: nucel-bg-job-slo
+      interval: 30s
+      rules:
+        # Queue depth too high — workers stuck or producer outpacing
+        # consumers (PLAN_1M §5 #2 bottleneck). Per-kind.
+        - alert: NucelBgJobQueueDepthHigh
+          expr: |
+            max by (kind) (nucel_bg_job_depth{status="pending"})
+              > {{ $t.bgJobPendingDepth | default 5000 }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "bg_job pending depth high for kind {{`{{`}} $labels.kind {{`}}`}}"
+            description: |
+              The {{`{{`}} $labels.kind {{`}}`}} queue has >
+              {{ $t.bgJobPendingDepth | default 5000 }} pending rows for >10min and
+              is not draining. Scale the matching worker pool or investigate
+              stuck handlers (docs/runbooks/scaling.md).
+
+        # Dispatch stalled: pending depth > 0 but the runner is doing no
+        # work. Distinguishes "stuck workers" from "busy workers".
+        - alert: NucelBgJobDispatchStalled
+          expr: |
+            (max(nucel_bg_job_depth{status="pending"}) > {{ $t.bgJobStallDepth | default 100 }})
+            and
+            (sum(rate(nucel_bg_job_dispatch_total{outcome!="_init"}[5m])) == 0)
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "bg_job dispatch stalled (queue non-empty, zero throughput)"
+            description: |
+              There are > {{ $t.bgJobStallDepth | default 100 }} pending jobs but
+              the runner has dispatched nothing for 10min. The worker pool is
+              wedged — check worker pod liveness, DB connectivity, and the
+              claim path.
+
+        # Claim p99 latency — DB pressure signal.
+        - alert: NucelBgJobClaimLatencyP99High
+          expr: |
+            histogram_quantile(
+              0.99,
+              sum by (le) (rate(nucel_bg_job_claim_latency_seconds_bucket[5m]))
+            ) > {{ $t.bgJobClaimP99Seconds | default 0.5 }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "bg_job claim p99 above {{ $t.bgJobClaimP99Seconds | default 0.5 }}s"
+            description: |
+              99th-percentile claim latency above {{ $t.bgJobClaimP99Seconds | default 0.5 }}s
+              for >10min — SurrealDB/TiKV is the likely bottleneck. Check DB CPU,
+              indexes, or scale TiKV nodes.
+
+        # DLQ non-empty — operator-actionable.
+        - alert: NucelBgJobDlqNonEmpty
+          expr: max by (kind) (nucel_bg_job_depth{status="failed"}) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "bg_job DLQ non-empty for kind {{`{{`}} $labels.kind {{`}}`}}"
+            description: |
+              Jobs of kind {{`{{`}} $labels.kind {{`}}`}} have exhausted retries.
+              Inspect GET /api/v1/admin/jobs/dlq?kind={{`{{`}} $labels.kind {{`}}`}}
+              and requeue or discard.
+
+    # ─────────────────────────── DB latency ───────────────────────────
+    - name: nucel-db-slo
+      interval: 30s
+      rules:
+        # DB query p99 high — pool starvation / N+1 surfaces here as a
+        # latency cliff across all classes (PLAN_1M §5).
+        - alert: NucelDbQueryP99High
+          expr: |
+            histogram_quantile(
+              0.99,
+              sum by (le) (rate(nucel_db_query_duration_seconds_bucket{op!="_init"}[5m]))
+            ) > {{ $t.dbQueryP99Seconds | default 0.5 }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "SurrealDB query p99 above {{ $t.dbQueryP99Seconds | default 0.5 }}s"
+            description: |
+              p99 DB query latency above {{ $t.dbQueryP99Seconds | default 0.5 }}s
+              for >10min. Pool starvation / N+1 / TiKV pressure shows up here as a
+              latency cliff across all request classes at once.
+
+    # ──────────────────────── SSE leak (#281 guard) ────────────────────────
+    - name: nucel-sse-slo
+      interval: 30s
+      rules:
+        # Connection leak: the gauge ratchets up without coming back down
+        # (the #281 SSE fanout-deadlock signature). Alert if the gauge has
+        # only grown over the last 30m AND is above a floor.
+        - alert: NucelSseConnectionLeak
+          expr: |
+            (
+              min_over_time(sum(nucel_sse_connections{stream!="_init"})[30m:1m])
+                > {{ $t.sseLeakFloor | default 500 }}
+            )
+            and
+            (
+              deriv(sum(nucel_sse_connections{stream!="_init"})[30m:1m]) > 0
+            )
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "SSE connection count ratcheting up (possible #281 leak)"
+            description: |
+              Open SSE connections have only grown over 30min and stayed above
+              {{ $t.sseLeakFloor | default 500 }}. This is the #281 "SSE log fanout
+              deadlock / leaked connection" signature — streams aren't being
+              dropped on disconnect. Restart guard; inspect SseConnGuard lifetimes.
+
+    # ──────────────────────── Registry blob path ────────────────────────
+    - name: nucel-registry-slo
+      interval: 30s
+      rules:
+        # Registry blob p99 high — OCI pull/push is a CI hot path.
+        - alert: NucelRegistryBlobP99High
+          expr: |
+            histogram_quantile(
+              0.99,
+              sum by (le) (rate(nucel_registry_blob_duration_seconds_bucket[5m]))
+            ) > {{ $t.registryBlobP99Seconds | default 10 }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Registry blob op p99 above {{ $t.registryBlobP99Seconds | default 10 }}s"
+            description: |
+              p99 OCI registry blob read/finalise latency above
+              {{ $t.registryBlobP99Seconds | default 10 }}s for >10min. CI image
+              pulls are on this path — check object-store / PVC backing IOPS.
+
+    # ──────────────────────── Kubernetes / platform ────────────────────────
+    - name: nucel-platform
+      interval: 30s
+      rules:
+        # CrashLoopBackOff — any nucel-server container restarting in a loop.
+        - alert: NucelPodCrashLooping
+          expr: |
+            max by (pod) (
+              rate(kube_pod_container_status_restarts_total{namespace="{{ include "nucel.namespace" . }}", pod=~"{{ include "nucel.fullname" . }}.*"}[15m])
+            ) * 60 * 15 > {{ $t.crashLoopRestarts | default 3 }}
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Pod {{`{{`}} $labels.pod {{`}}`}} is crash-looping"
+            description: |
+              {{`{{`}} $labels.pod {{`}}`}} has restarted more than
+              {{ $t.crashLoopRestarts | default 3 }} times in 15min. Check
+              `kubectl logs --previous` and recent deploys.
+
+        # OOMKilled — last termination reason was OOM.
+        - alert: NucelPodOOMKilled
+          expr: |
+            max by (pod) (
+              kube_pod_container_status_last_terminated_reason{namespace="{{ include "nucel.namespace" . }}", pod=~"{{ include "nucel.fullname" . }}.*", reason="OOMKilled"}
+            ) > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Pod {{`{{`}} $labels.pod {{`}}`}} was OOMKilled"
+            description: |
+              A nucel-server container was killed for exceeding its memory
+              limit. Raise `server.resources.limits.memory` or investigate a
+              memory leak (PLAN_1M soak tier).
+
+        # Not-ready / unavailable replicas — the Deployment can't keep its
+        # desired pod count Ready.
+        - alert: NucelDeploymentNotReady
+          expr: |
+            kube_deployment_status_replicas_unavailable{namespace="{{ include "nucel.namespace" . }}", deployment=~"{{ include "nucel.fullname" . }}.*"} > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Deployment {{`{{`}} $labels.deployment {{`}}`}} has unavailable replicas"
+            description: |
+              {{`{{`}} $labels.deployment {{`}}`}} has had unavailable replicas
+              for >15min. Check failing pods, node pressure, and probes.
+
+        # HPA pinned at maxReplicas — offered load has outrun capacity
+        # (PLAN_1M §5: "the knee is autoscaling, not code").
+        - alert: NucelHpaAtMaxReplicas
+          expr: |
+            kube_horizontalpodautoscaler_status_current_replicas{namespace="{{ include "nucel.namespace" . }}", horizontalpodautoscaler=~"{{ include "nucel.fullname" . }}.*"}
+              >=
+            kube_horizontalpodautoscaler_spec_max_replicas{namespace="{{ include "nucel.namespace" . }}", horizontalpodautoscaler=~"{{ include "nucel.fullname" . }}.*"}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "HPA {{`{{`}} $labels.horizontalpodautoscaler {{`}}`}} pinned at maxReplicas"
+            description: |
+              The HPA has been at its max replica count for >15min — the offered
+              rate has outrun provisioned capacity. Raise `hpa.maxReplicas` or
+              add nodes (docs/runbooks/scaling.md).
+
+        # PVC nearly full — repo storage / registry backing running out.
+        - alert: NucelPvcNearFull
+          expr: |
+            (
+              kubelet_volume_stats_used_bytes{namespace="{{ include "nucel.namespace" . }}", persistentvolumeclaim=~"{{ include "nucel.fullname" . }}.*|.*nucel.*"}
+              /
+              clamp_min(kubelet_volume_stats_capacity_bytes{namespace="{{ include "nucel.namespace" . }}", persistentvolumeclaim=~"{{ include "nucel.fullname" . }}.*|.*nucel.*"}, 1)
+            ) > {{ $t.pvcUsedRatio | default 0.85 }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "PVC {{`{{`}} $labels.persistentvolumeclaim {{`}}`}} over {{ $t.pvcUsedRatio | default 0.85 }} full"
+            description: |
+              {{`{{`}} $labels.persistentvolumeclaim {{`}}`}} is over
+              {{ $t.pvcUsedRatio | default 0.85 }} of capacity. Expand the volume
+              or move repo/registry storage to object store before it fills.
+
+    {{- if $a.certExpiry }}
+    {{- if $a.certExpiry.enabled }}
+    # ──────────────────────── TLS cert expiry ────────────────────────
+    # Requires cert-manager's metrics endpoint scraped (it exports
+    # `certmanager_certificate_expiration_timestamp_seconds`). Gated
+    # because not every install uses cert-manager (some terminate TLS at
+    # the ALB via ACM, where this metric doesn't exist).
+    - name: nucel-cert-expiry
+      interval: 5m
+      rules:
+        - alert: NucelTlsCertExpiringSoon
+          expr: |
+            (certmanager_certificate_expiration_timestamp_seconds{namespace="{{ include "nucel.namespace" . }}"} - time())
+              < ({{ $a.certExpiry.warnDays | default 14 }} * 86400)
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "TLS cert {{`{{`}} $labels.name {{`}}`}} expiring in < {{ $a.certExpiry.warnDays | default 14 }}d"
+            description: |
+              Certificate {{`{{`}} $labels.name {{`}}`}} expires in less than
+              {{ $a.certExpiry.warnDays | default 14 }} days. Check the
+              cert-manager Certificate / Issuer; renewal may be stuck.
+    {{- end }}
+    {{- end }}
+
+    {{- if $a.backup }}
+    {{- if $a.backup.enabled }}
+    # ──────────────────────── Backup freshness ────────────────────────
+    # Coordinates with the DocumentDB / SurrealDB backup work. The backup
+    # job (or a CronJob + pushgateway / kube-state-metrics on the Job)
+    # must export a "last successful backup" unix timestamp under the
+    # metric name in `metrics.alerts.backup.metricName`. Gated + the
+    # metric name is configurable because the backup pipeline owns it and
+    # it may not exist yet.
+    - name: nucel-backup
+      interval: 5m
+      rules:
+        - alert: NucelNoSuccessfulBackup
+          expr: |
+            (time() - max({{ $a.backup.metricName | default "nucel_backup_last_success_timestamp_seconds" }}))
+              > ({{ $a.backup.maxAgeHours | default 26 }} * 3600)
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            summary: "No successful backup in > {{ $a.backup.maxAgeHours | default 26 }}h"
+            description: |
+              The last successful backup is older than
+              {{ $a.backup.maxAgeHours | default 26 }}h (or the metric is
+              missing entirely). A 1M-user platform with no fresh backup is a
+              data-loss risk — investigate the backup CronJob immediately.
+    {{- end }}
+    {{- end }}
+{{- end }}

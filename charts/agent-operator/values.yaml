@@ -1,10 +1,49 @@
 # -- Image configuration shared by operator and webhook
+#
+# `tag` defaults to empty so the chart falls back to `Chart.AppVersion`
+# (pinned per release in Chart.yaml). A floating `latest` tag is an
+# anti-pattern in production — it makes rollouts non-reproducible and
+# breaks `IfNotPresent` caching. Set `image.tag: latest` explicitly only
+# for local dev.
 image:
   repository: agent-operator
-  tag: latest
+  tag: ""
   pullPolicy: IfNotPresent
 
+# -- Pod- and container-level SecurityContext for the operator + webhook
+# Deployments (and any Job the operator spawns from its own pod spec).
+#
+# IMPORTANT — the published `agent-operator-*` images run as root
+# (Dockerfile: debian:bookworm-slim with no USER), so `runAsNonRoot: true`
+# / `readOnlyRootFilesystem: true` are NOT defaulted on. The safe-on-root
+# profile below (drop ALL caps, no privilege escalation, RuntimeDefault
+# seccomp) is applied by default; rebuild the images with `USER 65532` to
+# enable the full restricted profile via the commented keys. Set either
+# block to `{}` to emit nothing.
+podSecurityContext:
+  seccompProfile:
+    type: RuntimeDefault
+  # runAsNonRoot: true      # enable only on a nonroot-rebuilt image
+  # runAsUser: 65532
+  # runAsGroup: 65532
+  # fsGroup: 65532
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+  # runAsNonRoot: true      # enable only on a nonroot-rebuilt image
+  # runAsUser: 65532
+  # readOnlyRootFilesystem: true
+
 # -- Operator deployment settings
+#
+# The operator uses coordination.k8s.io Lease leader-election (see
+# templates/clusterrole.yaml), so `replicas: 2` runs a hot standby that
+# takes over reconciliation if the active pod dies. Pair `replicas: 2`
+# with `podDisruptionBudget.enabled: true` for drain-safe HA.
 operator:
   replicas: 1
   resources:
@@ -14,6 +53,12 @@ operator:
     limits:
       cpu: 500m
       memory: 256Mi
+  # Pod scheduling — all guarded, empty = scheduler default.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  priorityClassName: ""
 
 # -- Webhook deployment settings
 webhook:
@@ -28,6 +73,37 @@ webhook:
   service:
     type: ClusterIP
     port: 8080
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  priorityClassName: ""
+
+# -- PodDisruptionBudget for the operator Deployment (drain-safe HA).
+#
+# Off by default because the operator ships `replicas: 1` — a PDB with
+# minAvailable:1 on a single replica would block node drains entirely.
+# Enable together with `operator.replicas: 2` so voluntary disruptions
+# (node drain, cluster upgrade) can't take the reconciler fully down.
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+  maxUnavailable: null
+
+# -- NetworkPolicy for the operator namespace (defense in depth).
+#
+# Off by default so the chart renders on clusters whose CNI doesn't
+# enforce policy. When enabled it allows webhook ingress on the service
+# port and leaves egress allow-all (the operator/webhook reach the K8s
+# API, GitHub, Anthropic, Jira and the nucel-git API — an allowlist is
+# install-specific). DNS is always permitted.
+networkPolicy:
+  enabled: false
+  ingress:
+    from: []
+  egress:
+    denyAll: false
+    to: []
 
 # -- Worker (Jobs spawned by operator -- resource limits only)
 worker:
@@ -68,9 +144,8 @@ secrets:
   webhookApiToken: ""
   githubWebhookSecret: ""
   jiraWebhookSecret: ""
-  # nucel-git integration
-  nucelGitApiKey: ""         # PAT or OIDC JWT for nucel-git API
-  nucelGitWebhookSecret: ""  # HMAC secret for /webhooks/nucel-git
+  nucelGitApiKey: ""
+  nucelWebhookSecret: ""
 
 # -- Namespace
 namespace:
@@ -93,6 +168,9 @@ config:
     workspace: notify-only
   github:
     auth: app
+  nucelGit:
+    baseUrl: ""
+    apiKeyEnv: "NUCEL_GIT_API_KEY"
   notifications:
     channels: []
     notifyOnCompletion: false
@@ -129,12 +207,6 @@ config:
     #   "org/expensive-repo":
     #     dailyLimitUsd: 200.0
     #     monthlyLimitUsd: 2000.0
-
-  # -- nucel-git connection (used when providers.git/issues/ci = "nucel-git")
-  nucelGit:
-    baseUrl: "https://git.nucel.io"
-    # API key injected from secrets.nucelGitApiKey
-    # Webhook secret injected from secrets.nucelGitWebhookSecret
 
 # -- Monitoring (Prometheus & Grafana)
 monitoring:

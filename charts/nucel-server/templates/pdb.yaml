@@ -1,12 +1,23 @@
-{{- if and .Values.podDisruptionBudget .Values.podDisruptionBudget.enabled }}
-# Fix H2 — PodDisruptionBudget for the main nucel-server Deployment.
-#
-# Keeps at least `minAvailable` server pod up during voluntary
-# disruptions (node drain, cluster upgrade, Karpenter consolidation).
-# WARNING: with `server.replicas: 1` (chart default) and
-# `minAvailable: 1` the PDB will block node drains entirely. Pair this
-# with `server.replicas >= 2` OR `autoscaling.enabled: true` (which
-# defaults to `minReplicas: 2`).
+{{- /*
+PodDisruptionBudget for the main nucel-server Deployment.
+
+Supports both the legacy `.Values.podDisruptionBudget.*` keys and the
+new `.Values.pdb.*` knobs (scale-hardening). Either set turning it on
+enables the PDB; new installs should prefer the `pdb.*` block.
+
+Keeps at least `minAvailable` server pods up during voluntary
+disruptions (node drain, cluster upgrade, Karpenter consolidation).
+WARNING: with `server.replicas: 1` (chart default) and
+`minAvailable: 1` the PDB will block node drains entirely. Pair this
+with `server.replicas >= 2` OR `hpa.enabled: true` (which defaults to
+`minReplicas: 2`).
+*/ -}}
+{{- $pdb := default (dict) .Values.pdb -}}
+{{- $legacy := default (dict) .Values.podDisruptionBudget -}}
+{{- $enabled := or (and (hasKey $pdb "enabled") $pdb.enabled) (and (hasKey $legacy "enabled") $legacy.enabled) -}}
+{{- if $enabled }}
+{{- $minAvailable := default $legacy.minAvailable $pdb.minAvailable -}}
+{{- $maxUnavailable := default $legacy.maxUnavailable $pdb.maxUnavailable -}}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -15,10 +26,10 @@ metadata:
   labels:
     {{- include "nucel.labels" . | nindent 4 }}
 spec:
-  {{- if .Values.podDisruptionBudget.maxUnavailable }}
-  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  {{- if $maxUnavailable }}
+  maxUnavailable: {{ $maxUnavailable }}
   {{- else }}
-  minAvailable: {{ .Values.podDisruptionBudget.minAvailable | default 1 }}
+  minAvailable: {{ default 1 $minAvailable }}
   {{- end }}
   selector:
     matchLabels:

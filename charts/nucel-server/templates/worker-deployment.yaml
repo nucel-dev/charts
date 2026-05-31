@@ -22,6 +22,10 @@ metadata:
     checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
 spec:
   replicas: {{ .Values.worker.replicas }}
+  {{- with .Values.worker.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "nucel.selectorLabels" . | nindent 6 }}
@@ -33,10 +37,31 @@ spec:
         app.kubernetes.io/component: worker
     spec:
       serviceAccountName: {{ include "nucel.serviceAccountName" . }}
+      {{- include "nucel.podSecurityContext" . | nindent 6 }}
+      {{- with .Values.worker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
       containers:
         - name: worker
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "nucel.containerSecurityContext" . | nindent 10 }}
           command: ["/usr/local/bin/nucel-worker"]
           envFrom:
             - configMapRef:
@@ -102,11 +127,21 @@ spec:
       volumes:
         - name: repos
           persistentVolumeClaim:
-            claimName: nucel-repos
+            claimName: {{ include "nucel.storage.pvcName" (dict "class" "gitWorkspaces") }}
+        {{- $registryBackend := include "nucel.storage.backend" (dict "ctx" $ "class" "registry") }}
         - name: registry
+          {{- if eq $registryBackend "emptyDir" }}
+          emptyDir: {}
+          {{- else }}
           persistentVolumeClaim:
-            claimName: nucel-registry
+            claimName: {{ include "nucel.storage.pvcName" (dict "class" "registry") }}
+          {{- end }}
+        {{- $npmBackend := include "nucel.storage.backend" (dict "ctx" $ "class" "npm") }}
         - name: npm
+          {{- if eq $npmBackend "emptyDir" }}
+          emptyDir: {}
+          {{- else }}
           persistentVolumeClaim:
-            claimName: nucel-npm
+            claimName: {{ include "nucel.storage.pvcName" (dict "class" "npm") }}
+          {{- end }}
 {{- end }}

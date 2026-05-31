@@ -12,13 +12,19 @@
 secrets:
   requireProductionValues: true
 
-# HPA: scale server replicas 2-10 at 70% CPU / 80% memory.
+# HPA: scale server replicas 3-30 at 60% CPU / 75% memory (scale push).
+# Floor 3 keeps 2 pods serving through a single node/zone loss while the
+# HPA backfills; ceiling 30 fits the arm64-general NodePool (100 CPU /
+# 200Gi) at the 1 CPU / 1Gi per-pod limit. 60% CPU target scales out
+# before the bursty handlers (argon2, upload-pack, registry blobs)
+# saturate a pod during the ~60s a new replica takes to become ready.
+# See values.yaml `hpa.*` for the full rationale.
 autoscaling:
   enabled: true
-  minReplicas: 2
-  maxReplicas: 10
-  targetCPUUtilizationPercentage: 70
-  targetMemoryUtilizationPercentage: 80
+  minReplicas: 3
+  maxReplicas: 30
+  targetCPUUtilizationPercentage: 60
+  targetMemoryUtilizationPercentage: 75
 
 # PDB: tolerate a single unavailable replica during rolling updates.
 podDisruptionBudget:
@@ -61,3 +67,81 @@ prometheus:
     fatalRate: 0.5
   serviceMonitor:
     enabled: true
+
+# Ship the Grafana scale/queue overview dashboard (picked up by the
+# kube-prometheus-stack Grafana sidecar). Additive — does not touch any
+# hand-built dashboards. If your sidecar selects on a non-default label,
+# override metrics.grafanaDashboard.sidecarLabel.
+metrics:
+  enabled: true
+  grafanaDashboard:
+    enabled: true
+    sidecarLabel: grafana_dashboard
+    folder: "Nucel"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-replica storage strategy (#236 / #244).
+#
+# This overlay runs the server multi-replica (autoscaling 3-30 above), so NO
+# shared data class may sit on a ReadWriteOnce PVC or emptyDir — both break
+# across replicas (Multi-Attach errors / 404 race / data loss on pod cycle).
+# The chart's `nucel.storage.validate` guard fails the install if you violate
+# this.
+#
+# Production-recommended config:
+#   pages         → s3   (object storage; every replica serves identical bytes)
+#   registry      → pvc + ReadWriteMany (EFS)  — binary is FS-only, no S3 yet
+#   npm           → pvc + ReadWriteMany (EFS)
+#   artifacts     → pvc + ReadWriteMany (EFS)
+#   gitWorkspaces → pvc + ReadWriteMany (EFS) hot cache + S3 cold tier
+#
+# Wire the EFS CSI driver and create a ReadWriteMany StorageClass named `efs`
+# (or override storageClassName below). Pages S3 auth uses IRSA — set the
+# serviceAccount role-arn below.
+storage:
+  # EFS sizing is elastic; these requests are nominal (EFS ignores capacity).
+  classes:
+    pages:
+      backend: s3
+      s3:
+        # Set the bucket (or leave empty to share repoStorage.s3.bucket with
+        # the pages/ prefix). Authenticate via IRSA (serviceAccount below).
+        bucket: ""
+        prefix: "pages/"
+        region: "eu-central-1"
+    registry:
+      backend: pvc
+      accessMode: ReadWriteMany
+      storageClassName: efs
+      size: 20Gi
+    npm:
+      backend: pvc
+      accessMode: ReadWriteMany
+      storageClassName: efs
+      size: 10Gi
+    artifacts:
+      backend: pvc
+      accessMode: ReadWriteMany
+      storageClassName: efs
+      size: 50Gi
+    gitWorkspaces:
+      # Local EFS PVC is the hot cache; S3 is the cold tier (set s3.bucket to
+      # enable archival of idle repos). RWX so every replica + the worker
+      # share /data/repos.
+      backend: s3
+      accessMode: ReadWriteMany
+      storageClassName: efs
+      size: 50Gi
+      s3:
+        bucket: ""
+        prefix: "repos/"
+        region: "eu-central-1"
+
+# IRSA: the pages S3 backend authenticates via the pod's projected
+# service-account token. Stamp the IAM role ARN that grants s3:* on the
+# bucket(s) above. Without this the AWS SDK falls through to IMDS and times
+# out (see #273).
+serviceAccount:
+  create: true
+  annotations: {}
+    # eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT:role/nucel-server-irsa-role

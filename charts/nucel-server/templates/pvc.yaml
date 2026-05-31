@@ -1,63 +1,50 @@
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: nucel-repos
-  namespace: {{ include "nucel.namespace" . }}
-  labels:
-    {{- include "nucel.labels" . | nindent 4 }}
-spec:
-  accessModes: ["ReadWriteOnce"]
-  {{- if .Values.storage.storageClassName }}
-  storageClassName: {{ .Values.storage.storageClassName }}
-  {{- end }}
-  resources:
-    requests:
-      storage: {{ .Values.storage.repos }}
+{{- /*
+PersistentVolumeClaims, one per data class whose backend resolves to `pvc`
+(#236 / #244). Each PVC honors the per-class accessMode / storageClassName /
+size from `storage.classes.<class>`, falling back to the legacy
+`storage.<legacyKey>` + `storage.storageClassName` values so existing
+single-replica installs upgrade unchanged.
+
+`pages` is intentionally NOT in this list when its backend is `s3` or
+`emptyDir` (the common cases); it only gets a PVC if explicitly set to
+backend=pvc. The S3-capable `gitWorkspaces` (a.k.a. repos) ALWAYS keeps its
+PVC as the hot cache, even with backend=s3.
+*/ -}}
+{{- $ := . -}}
+{{- /* class -> (PVC object name, legacy size key, default size) */ -}}
+{{- $pvcClasses := list
+  (dict "class" "gitWorkspaces" "name" "nucel-repos"    "legacy" "repos"    "size" "50Gi" "always" true)
+  (dict "class" "artifacts"     "name" "nucel-ci-data"  "legacy" "ciData"   "size" "50Gi")
+  (dict "class" "registry"      "name" "nucel-registry" "legacy" "registry" "size" "20Gi")
+  (dict "class" "npm"           "name" "nucel-npm"      "legacy" "npm"      "size" "10Gi")
+  (dict "class" "pages"         "name" "nucel-pages"    "legacy" ""         "size" "10Gi")
+-}}
+{{- range $entry := $pvcClasses }}
+{{- $cfg := default (dict) (index (default (dict) (default (dict) $.Values.storage).classes) $entry.class) }}
+{{- $backend := include "nucel.storage.backend" (dict "ctx" $ "class" $entry.class) }}
+{{- /* repos hot cache is always a PVC (s3 = cold tier on top of it). */ -}}
+{{- if or (eq $backend "pvc") (and $entry.always (eq $backend "s3")) }}
+{{- $size := $cfg.size }}
+{{- if and (not $size) $entry.legacy }}{{ $size = index $.Values.storage $entry.legacy }}{{ end }}
+{{- $size = default $entry.size $size }}
+{{- $sc := default $.Values.storage.storageClassName $cfg.storageClassName }}
+{{- $access := default "ReadWriteOnce" $cfg.accessMode }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: nucel-ci-data
-  namespace: {{ include "nucel.namespace" . }}
+  name: {{ $entry.name }}
+  namespace: {{ include "nucel.namespace" $ }}
   labels:
-    {{- include "nucel.labels" . | nindent 4 }}
+    {{- include "nucel.labels" $ | nindent 4 }}
+    nucel.io/storage-class: {{ $entry.class }}
 spec:
-  accessModes: ["ReadWriteOnce"]
-  {{- if .Values.storage.storageClassName }}
-  storageClassName: {{ .Values.storage.storageClassName }}
+  accessModes: [{{ $access | quote }}]
+  {{- if $sc }}
+  storageClassName: {{ $sc }}
   {{- end }}
   resources:
     requests:
-      storage: {{ .Values.storage.ciData }}
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: nucel-registry
-  namespace: {{ include "nucel.namespace" . }}
-  labels:
-    {{- include "nucel.labels" . | nindent 4 }}
-spec:
-  accessModes: ["ReadWriteOnce"]
-  {{- if .Values.storage.storageClassName }}
-  storageClassName: {{ .Values.storage.storageClassName }}
-  {{- end }}
-  resources:
-    requests:
-      storage: {{ .Values.storage.registry }}
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: nucel-npm
-  namespace: {{ include "nucel.namespace" . }}
-  labels:
-    {{- include "nucel.labels" . | nindent 4 }}
-spec:
-  accessModes: ["ReadWriteOnce"]
-  {{- if .Values.storage.storageClassName }}
-  storageClassName: {{ .Values.storage.storageClassName }}
-  {{- end }}
-  resources:
-    requests:
-      storage: {{ .Values.storage.npm }}
+      storage: {{ $size }}
+{{- end }}
+{{- end }}

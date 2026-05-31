@@ -18,6 +18,12 @@ data:
 
     [github]
     auth = {{ .Values.config.github.auth | quote }}
+
+    [nucel_git]
+    {{- if .Values.config.nucelGit.baseUrl }}
+    base_url = {{ .Values.config.nucelGit.baseUrl | quote }}
+    {{- end }}
+    api_key_env = {{ .Values.config.nucelGit.apiKeyEnv | quote }}
     {{- if eq .Values.config.github.auth "app" }}
     app_id_env = "GITHUB_APP_ID"
     private_key_env = "GITHUB_APP_PRIVATE_KEY"

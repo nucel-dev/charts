@@ -1,14 +1,34 @@
-{{- if and .Values.autoscaling .Values.autoscaling.enabled }}
-# Fix H1 — HorizontalPodAutoscaler for the main nucel-server Deployment.
-#
-# CPU + memory targets only. Queue-depth scaling (nucel_bg_job_depth)
-# would need prometheus-adapter to expose the metric to the K8s metrics
-# API; that's documented as a follow-up in PRODUCTION_HARDENING.md
-# rather than shipped here so the chart doesn't acquire a hard
-# dependency on prometheus-adapter.
-#
-# `server.replicas` becomes the initial replica count only; once the
-# HPA writes the scale subresource, it owns replica count from then on.
+{{- /*
+HorizontalPodAutoscaler for the main nucel-server Deployment.
+
+Supports both the legacy `.Values.autoscaling.*` keys and the new
+`.Values.hpa.*` knobs (scale-hardening). Either set turning the HPA
+on enables it; new installs should prefer the `hpa.*` block.
+
+CPU + memory targets only. Queue-depth scaling (nucel_bg_job_depth)
+would need prometheus-adapter to expose the metric to the K8s metrics
+API; that's documented as a follow-up in PRODUCTION_HARDENING.md
+rather than shipped here so the chart doesn't acquire a hard
+dependency on prometheus-adapter.
+
+`server.replicas` becomes the initial replica count only; once the
+HPA writes the scale subresource, it owns replica count from then on.
+
+Cooldown (behavior) windows default to:
+  - scaleUp:   60s stabilization, +100% or +4 pods per 30s
+  - scaleDown: 300s stabilization, -50% or -2 pods per 60s
+This makes scale-up snappy for traffic spikes while preventing
+flap-driven scale-down churn during transient lulls.
+*/ -}}
+{{- $hpa := default (dict) .Values.hpa -}}
+{{- $auto := default (dict) .Values.autoscaling -}}
+{{- $enabled := or (and (hasKey $hpa "enabled") $hpa.enabled) (and (hasKey $auto "enabled") $auto.enabled) -}}
+{{- if $enabled }}
+{{- $minReplicas := default (default 2 $auto.minReplicas) $hpa.minReplicas -}}
+{{- $maxReplicas := default (default 10 $auto.maxReplicas) $hpa.maxReplicas -}}
+{{- $cpuTarget := default $auto.targetCPUUtilizationPercentage $hpa.targetCPUUtilizationPercentage -}}
+{{- $memTarget := default $auto.targetMemoryUtilizationPercentage $hpa.targetMemoryUtilizationPercentage -}}
+{{- $behavior := default $auto.behavior $hpa.behavior -}}
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -21,27 +41,48 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: nucel-server
-  minReplicas: {{ .Values.autoscaling.minReplicas | default 2 }}
-  maxReplicas: {{ .Values.autoscaling.maxReplicas | default 10 }}
+  minReplicas: {{ $minReplicas }}
+  maxReplicas: {{ $maxReplicas }}
   metrics:
-    {{- if .Values.autoscaling.targetCPUUtilizationPercentage }}
+    {{- if $cpuTarget }}
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+          averageUtilization: {{ $cpuTarget }}
     {{- end }}
-    {{- if .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- if $memTarget }}
     - type: Resource
       resource:
         name: memory
         target:
           type: Utilization
-          averageUtilization: {{ .Values.autoscaling.targetMemoryUtilizationPercentage }}
+          averageUtilization: {{ $memTarget }}
     {{- end }}
-  {{- with .Values.autoscaling.behavior }}
   behavior:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- if $behavior }}
+    {{- toYaml $behavior | nindent 4 }}
+    {{- else }}
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+        - type: Pods
+          value: 4
+          periodSeconds: 30
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+      selectPolicy: Max
+    {{- end }}
 {{- end }}

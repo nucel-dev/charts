@@ -60,26 +60,35 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 
 {{/*
+Resolved image tag. Falls back to Chart.AppVersion when image.tag is empty,
+so a pinned per-release appVersion drives reproducible rollouts.
+*/}}
+{{- define "agent-operator.imageTag" -}}
+{{- .Values.image.tag | default .Chart.AppVersion -}}
+{{- end }}
+
+{{/*
 Resolved operator image (repository:tag).
 */}}
 {{- define "agent-operator.operatorImage" -}}
-{{- printf "%s-operator:%s" .Values.image.repository .Values.image.tag }}
+{{- printf "%s-operator:%s" .Values.image.repository (include "agent-operator.imageTag" .) }}
 {{- end }}
 
 {{/*
 Resolved webhook image (repository:tag).
 */}}
 {{- define "agent-operator.webhookImage" -}}
-{{- printf "%s-webhook:%s" .Values.image.repository .Values.image.tag }}
+{{- printf "%s-webhook:%s" .Values.image.repository (include "agent-operator.imageTag" .) }}
 {{- end }}
 
 {{/*
 Resolved worker image.
-Falls back to the operator image repository/tag when worker overrides are empty.
+Falls back to the operator image repository/tag (incl. AppVersion fallback)
+when worker overrides are empty.
 */}}
 {{- define "agent-operator.workerImage" -}}
 {{- $repo := default .Values.image.repository .Values.worker.image.repository }}
-{{- $tag  := default .Values.image.tag .Values.worker.image.tag }}
+{{- $tag  := default (include "agent-operator.imageTag" .) .Values.worker.image.tag }}
 {{- printf "%s-worker:%s" $repo $tag }}
 {{- end }}
 

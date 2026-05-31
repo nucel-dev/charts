@@ -1,0 +1,51 @@
+{{- if and .Values.networkPolicy .Values.networkPolicy.enabled }}
+# NetworkPolicy for nucel-server / worker / worker-pool pods (defense in
+# depth). Off by default (see values.yaml networkPolicy.enabled) so the
+# chart still renders on clusters whose CNI doesn't enforce policy.
+#
+# Selects every nucel pod by app.kubernetes.io/name (server + worker +
+# worker-pool share the same name label, differing only by component).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "nucel.fullname" . }}
+  namespace: {{ include "nucel.namespace" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "nucel.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.server.port }}
+        - protocol: TCP
+          port: {{ .Values.server.sshPort }}
+      {{- with .Values.networkPolicy.ingress.from }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  egress:
+    # DNS is always permitted — without it the server can't resolve
+    # SurrealDB / S3 / SMTP / webhook hostnames.
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- if .Values.networkPolicy.egress.denyAll }}
+    {{- with .Values.networkPolicy.egress.to }}
+    - to:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+    {{- else }}
+    # Allow-all egress (default): the server talks to a wide, install-
+    # specific set of endpoints. Set networkPolicy.egress.denyAll=true +
+    # egress.to to lock this down.
+    - {}
+    {{- end }}
+{{- end }}

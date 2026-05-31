@@ -1,0 +1,57 @@
+{{- /*
+PriorityClass definitions for nucel workloads.
+
+Two optional classes are shipped:
+
+  - `nucel-system`   — high priority, intended for control-plane-ish
+                       pods that MUST run for the platform to be
+                       reachable (the main nucel-server Deployment).
+  - `nucel-workload` — medium priority for background workers, seed
+                       jobs, and other interruptible work.
+
+Both are opt-in (`priorityClass.create: false` by default) because
+cluster-scoped PriorityClass resources can collide across installs in
+multi-tenant clusters. Operators wanting strict eviction ordering for
+nucel pods during node pressure should enable this AND set
+`server.priorityClassName: nucel-system` (and equivalents on the
+worker / seed values).
+
+Values:
+  priorityClass.create               -- master switch (default false)
+  priorityClass.system.name          -- "nucel-system"
+  priorityClass.system.value         -- 1000000  (well below
+                                        system-cluster-critical=2e9)
+  priorityClass.system.description   -- text shown by `kubectl describe`
+  priorityClass.workload.name        -- "nucel-workload"
+  priorityClass.workload.value       -- 100000
+  priorityClass.workload.description -- text shown by `kubectl describe`
+*/ -}}
+{{- if and .Values.priorityClass .Values.priorityClass.create }}
+{{- $sys := default (dict) .Values.priorityClass.system }}
+{{- if (hasKey $sys "enabled" | ternary $sys.enabled true) }}
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ default "nucel-system" $sys.name }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+value: {{ default 1000000 $sys.value }}
+globalDefault: false
+preemptionPolicy: {{ default "PreemptLowerPriority" $sys.preemptionPolicy }}
+description: {{ default "High-priority class for nucel control-plane pods (nucel-server)." $sys.description | quote }}
+---
+{{- end }}
+{{- $wl := default (dict) .Values.priorityClass.workload }}
+{{- if (hasKey $wl "enabled" | ternary $wl.enabled true) }}
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ default "nucel-workload" $wl.name }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+value: {{ default 100000 $wl.value }}
+globalDefault: false
+preemptionPolicy: {{ default "PreemptLowerPriority" $wl.preemptionPolicy }}
+description: {{ default "Medium-priority class for nucel background workloads (workers, seed jobs)." $wl.description | quote }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,53 @@
+{{- $previewEnv := default dict .Values.previewEnv -}}
+{{- $previewEnabled := default false $previewEnv.enabled -}}
+{{- $previewNamespace := default "nucel-previews" $previewEnv.namespace -}}
+{{- if $previewEnabled }}
+# RBAC for per-PR preview environments.
+#
+# nucel-server needs to create/delete Pods in the previews namespace
+# from the `preview_env_dispatch` + `preview_env_teardown` job
+# handlers. We scope this to a Role (namespace-scoped) rather than
+# extending the existing nucel-server ClusterRole — preview-pod
+# permissions stay independent of AW / CI permissions.
+#
+# The handlers POST raw Pods (no kube-rs dep) so we only need
+# get/list/create/delete on `pods`. Future slices may need
+# `services` and `networking.k8s.io/ingresses` if the dispatch path
+# moves Ingress provisioning into nucel-server instead of leaving it
+# with the cluster operator's wildcard.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "nucel.fullname" . }}-preview
+  namespace: {{ $previewNamespace | quote }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+    nucel.io/purpose: preview-envs
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "create", "delete"]
+  # `pods/log` so the PR UI can tail a failing preview pod when the
+  # dispatch row transitions to `failed` and the operator clicks
+  # "view logs". Read-only.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "nucel.fullname" . }}-preview
+  namespace: {{ $previewNamespace | quote }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+    nucel.io/purpose: preview-envs
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "nucel.serviceAccountName" . }}
+    namespace: {{ include "nucel.namespace" . }}
+roleRef:
+  kind: Role
+  name: {{ include "nucel.fullname" . }}-preview
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
