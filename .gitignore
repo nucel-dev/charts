@@ -1,0 +1,7 @@
+# Release artifacts are owned by CI (helm/chart-releaser-action) and live on
+# the gh-pages branch — never commit them to main. See README "Release flow".
+*.tgz
+/index.yaml
+/index.html
+.cr-release-packages/
+.cr-index/

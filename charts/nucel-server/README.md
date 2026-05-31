@@ -425,6 +425,42 @@ registry/npm/artifacts/gitWorkspaces → EFS `ReadWriteMany`).
 | `podDisruptionBudget.minAvailable` | `1` | |
 | `podDisruptionBudget.maxUnavailable` | `null` | mutually exclusive with `minAvailable` |
 
+### Network policy
+
+Off by default (a cluster without a CNI that enforces `NetworkPolicy` would
+silently no-op). Enable to restrict ingress/egress for the server pods.
+
+| Key | Default | Notes |
+|---|---|---|
+| `networkPolicy.enabled` | `false` | Renders a `networking.k8s.io/v1` `NetworkPolicy` for the server pods |
+| `networkPolicy.ingress.from` | `[]` | Extra ingress `from` peers (`namespaceSelector` / `podSelector` / `ipBlock`). Empty = allow the server ports from any source |
+| `networkPolicy.egress.denyAll` | `false` | When `true`, only DNS + `egress.to` entries are permitted; otherwise all egress is allowed |
+| `networkPolicy.egress.to` | `[]` | Allowed egress peers when `denyAll: true` |
+
+### Basic-auth gate (pre-launch / staging)
+
+A whole-app HTTP Basic auth gate for unpublished alpha/staging overlays. When
+enabled, the chart wires `NUCEL_BASIC_AUTH=<user>:<password>` into the server
+Deployment from a Secret; the outermost tower middleware (`nucel_server::basic_auth`)
+401s every request lacking a matching `Authorization: Basic` header.
+Health/metrics paths and kube-probe / ELB-HealthChecker user-agents bypass the
+gate so probes stay green. Off by default and fully transparent when disabled.
+
+| Key | Default | Notes |
+|---|---|---|
+| `basicAuth.enabled` | `false` | Arms the gate |
+| `basicAuth.user` | `nucel` | Username half of the credential |
+| `basicAuth.password` | `""` | **Pass via `--set basicAuth.password=...`** so it never lands in git. Required when `enabled=true` and no `existingSecret` — the chart `fail`s otherwise. Ignored when `existingSecret` is set |
+| `basicAuth.existingSecret` | `""` | Name of a Secret in the server namespace holding key `NUCEL_BASIC_AUTH` (value `user:pass`). When set, the chart skips rendering its own Secret and wires the env from this one (matches the marketing site's `nucel-web-basic-auth` shape) |
+
+```bash
+# Arm the staging gate without committing the password
+helm upgrade --install nucel nucel/nucel-server \
+  --set basicAuth.enabled=true \
+  --set basicAuth.user=alpha \
+  --set basicAuth.password="$(openssl rand -base64 18)"
+```
+
 ### Logging
 
 | Key | Default | Notes |

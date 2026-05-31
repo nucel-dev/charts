@@ -51,7 +51,22 @@ on every push to `main`:
 3. CI runs `cr package` + `cr upload` + `cr index` — a GitHub Release is created with the
    `.tgz` attached, and `index.yaml` is updated on the `gh-pages` branch.
 
-> Do NOT commit packaged `.tgz` files or hand-edit `index.yaml` — CI owns those artefacts.
+> Do NOT commit packaged `.tgz` files or hand-edit `index.yaml` — CI owns those
+> artefacts (they live on the `gh-pages` branch). The root `.gitignore` blocks
+> them from `main`.
+
+## CI
+
+Two workflows guard the repo:
+
+- **`lint.yml`** (PRs + pushes to `main` touching `charts/**`) — `helm lint`
+  every chart, then `helm template` smoke renders for nucel-server (relaxed-dev,
+  production-values, and full-HA shapes) and agent-operator (default + HA),
+  plus a secret-literal assertion that fails if any operator-provided secret
+  renders with a baked-in value. This catches chart regressions before release.
+- **`release.yml`** (pushes to `main`) — `helm/chart-releaser-action` packages,
+  uploads, and re-indexes. `skip_existing: true` keeps it idempotent so a push
+  touching one chart doesn't 422 on the others' already-published releases.
 
 ## Production hardening (nucel-server)
 

@@ -31,3 +31,9 @@ jobs:
           CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
         with:
           charts_dir: charts
+          # Idempotency: a push that touches one chart re-runs `cr upload` for
+          # every chart. Without skip_existing the action 422s when a release
+          # tag already exists (see the 0.1.15 / 0.1.29 run failures), which
+          # also aborts the `cr index` step and leaves gh-pages stale. With it,
+          # already-published versions are skipped and only new ones publish.
+          skip_existing: true

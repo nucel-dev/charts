@@ -1,0 +1,137 @@
+name: Lint and Test Charts
+
+# Catches chart regressions before they reach the release pipeline:
+#   - helm lint on every chart
+#   - helm template smoke renders (default + relaxed-dev + HA toggles)
+#   - asserts no secret literals leak into rendered Secrets
+#
+# Runs on PRs and on pushes to main (the release workflow runs separately
+# and only publishes; this is the gate that fails fast on bad templates).
+on:
+  pull_request:
+    paths:
+      - 'charts/**'
+      - '.github/workflows/lint.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'charts/**'
+
+jobs:
+  lint-template:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: helm lint (all charts)
+        run: |
+          set -euo pipefail
+          fail=0
+          for chart in charts/*/; do
+            echo "::group::helm lint ${chart}"
+            helm lint "${chart}" || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail
+
+      # nucel-server ships a fail-fast guard (required production secrets).
+      # Render three shapes so a broken template is caught regardless of the
+      # toggle combination an operator picks.
+      - name: helm template — nucel-server (relaxed dev)
+        run: |
+          helm template t charts/nucel-server \
+            --set secrets.requireProductionValues=false \
+            --set prometheus.requireAuth=false \
+            > /tmp/ns-dev.yaml
+          test -s /tmp/ns-dev.yaml
+
+      - name: helm template — nucel-server (production values)
+        run: |
+          helm template t charts/nucel-server \
+            --set secrets.sessionKey=$(openssl rand -hex 64) \
+            --set secrets.oidcPrivateKey=ci-test-oidc-key \
+            --set secrets.metricsToken=$(openssl rand -base64 32) \
+            > /tmp/ns-prod.yaml
+          test -s /tmp/ns-prod.yaml
+
+      - name: helm template — nucel-server (HA + all features)
+        run: |
+          helm template t charts/nucel-server \
+            --set server.replicas=3 \
+            --set secrets.sessionKey=$(openssl rand -hex 64) \
+            --set secrets.oidcPrivateKey=ci-test-oidc-key \
+            --set secrets.metricsToken=$(openssl rand -base64 32) \
+            --set hpa.enabled=true \
+            --set podDisruptionBudget.enabled=true \
+            --set networkPolicy.enabled=true \
+            --set basicAuth.enabled=true \
+            --set basicAuth.password=ci-test-pass \
+            --set prometheus.alerts.enabled=true \
+            --set prometheus.serviceMonitor.enabled=true \
+            --set metrics.alerts.enabled=true \
+            --set metrics.serviceMonitor.enabled=true \
+            --set storage.classes.registry.accessMode=ReadWriteMany \
+            --set storage.classes.npm.accessMode=ReadWriteMany \
+            --set storage.classes.artifacts.accessMode=ReadWriteMany \
+            --set storage.classes.gitWorkspaces.accessMode=ReadWriteMany \
+            --set storage.classes.pages.backend=s3 \
+            --set storage.classes.pages.s3.bucket=ci-bucket \
+            > /tmp/ns-ha.yaml
+          grep -q "kind: HorizontalPodAutoscaler" /tmp/ns-ha.yaml
+          grep -q "kind: PodDisruptionBudget" /tmp/ns-ha.yaml
+          grep -q "kind: NetworkPolicy" /tmp/ns-ha.yaml
+          grep -q "kind: PrometheusRule" /tmp/ns-ha.yaml
+          grep -q "kind: ServiceMonitor" /tmp/ns-ha.yaml
+          grep -q "basic-auth" /tmp/ns-ha.yaml
+
+      - name: helm template — agent-operator (default)
+        run: |
+          helm template t charts/agent-operator > /tmp/ao-default.yaml
+          test -s /tmp/ao-default.yaml
+
+      - name: helm template — agent-operator (HA)
+        run: |
+          helm template t charts/agent-operator \
+            --set operator.replicas=2 \
+            --set podDisruptionBudget.enabled=true \
+            --set networkPolicy.enabled=true \
+            --set serviceMonitor.enabled=true \
+            > /tmp/ao-ha.yaml
+          grep -q "kind: PodDisruptionBudget" /tmp/ao-ha.yaml
+          grep -q "kind: NetworkPolicy" /tmp/ao-ha.yaml
+
+      # Secret hygiene: with NO secret values supplied, every operator-provided
+      # secret value must come from values — never a baked-in literal. The
+      # conditional keys below are wrapped in `{{- if .Values... }}` and so must
+      # be ENTIRELY ABSENT from the render when no value is set. (The only
+      # auto-generated material is the dev-fallback session key + SSH host key,
+      # which are intentional and not operator secrets.)
+      - name: assert no secret literals
+        run: |
+          set -euo pipefail
+          # Keys that are gated behind a values check — absent unless supplied.
+          for key in NUCEL_OIDC_PRIVATE_KEY NUCEL_METRICS_TOKEN ANTHROPIC_API_KEY \
+                     NUCEL_OPENROUTER_KEY NUCEL_GIT_USER NUCEL_GIT_PASSWORD \
+                     NUCEL_S3_ACCESS_KEY_ID NUCEL_S3_SECRET_ACCESS_KEY; do
+            # Match only a real YAML data line "  KEY: <value>" (2-space indent,
+            # value present) — not env var refs ("- name:" / "key:") or comments.
+            if grep -nE "^  ${key}: .+" /tmp/ns-dev.yaml; then
+              echo "FAIL: ${key} rendered with a value when none was supplied (literal leak)"
+              exit 1
+            fi
+          done
+          # agent-operator: with no secrets supplied, both Secrets must render
+          # with NO data keys at all (every key is conditional on a value).
+          helm template t charts/agent-operator > /tmp/ao-secrets.yaml
+          if grep -nE "^  (github-token|anthropic-api-key|api-token|github-webhook-secret|github-app-private-key): .+" /tmp/ao-secrets.yaml; then
+            echo "FAIL: agent-operator Secret carries a literal with no value supplied"
+            exit 1
+          fi
+          echo "OK: no secret literals detected"
