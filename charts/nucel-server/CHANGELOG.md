@@ -9,7 +9,52 @@ release.
 > Generated from `git log -- charts/nucel-server/`. Each entry lists the
 > short SHA, date, and a summary of the user-visible effect.
 
-## [0.1.37] — 2026-05-30 (appVersion 0.5.27)
+## [0.1.38] — 2026-05-31 (appVersion 0.5.27)
+
+### Fixed
+
+- **`values-production.yaml` now renders.** The production overlay shipped an
+  ExternalSecrets shape the template did not support: it set a per-key
+  `externalSecrets.remoteRefs` map (`oidcPrivateKey: nucel/prod/...`) while the
+  template only honoured a single-blob `externalSecrets.remoteRef.key`
+  (`dataFrom.extract`), and it set `externalSecrets.create: false` — a key the
+  chart ignores — instead of `secrets.create: false`. The net effect was that
+  `helm template/upgrade -f values-production.yaml` **errored**
+  (`remoteRef.key is required`) and, had it rendered, the chart-managed Secret
+  would have fought ESO over the same name. Both are corrected.
+
+### Added
+
+- **ExternalSecrets per-key map (`externalSecrets.remoteRefs`).**
+  `templates/externalsecret.yaml` now supports two mutually-exclusive remote
+  shapes: the existing single-blob `remoteRef.key` (`dataFrom.extract`) and a
+  new `remoteRefs: {<chartKey>: <remotePath>}` map that renders one
+  `data[]` entry per logical value (oidcPrivateKey, metricsToken, …). The
+  template fails fast when `externalSecrets.enabled=true` but neither is set,
+  and rejects unknown chartKeys. Documented in `values.yaml`, the README
+  External-Secrets table, and used by `values-production.yaml`.
+- **Production-HA overlay made explicit + documented.**
+  `values-production.yaml` now pins the two-axis `topologySpreadConstraints`
+  (hostname + `topology.kubernetes.io/zone`, `maxSkew: 1`, `ScheduleAnyway`)
+  so AZ spread intent is visible in the prod overlay, and enables
+  `priorityClass.create: true` + `priorityClassName: nucel-system` so node
+  pressure / Karpenter consolidation drains workers before the control plane.
+  Added an "HA at a glance (production)" table to the README plus
+  `topologySpreadConstraints` / `affinity` / `priorityClass*` rows in the
+  Reliability reference.
+
+### CI
+
+- **Smoke tests assert HA *shapes*, not just resource presence.** `lint.yml`
+  now checks HPA `minReplicas: 3` / `maxReplicas: 30`, topologySpread across
+  *both* hostname and zone, `priorityClassName: nucel-system`, and ≥4 RWX
+  PVCs in the full-HA render; adds a dedicated `values-production.yaml` overlay
+  render (per-key ExternalSecret present, chart Secret absent); asserts the
+  `nucel.storage.validate` guard **fails** an RWO-multi-replica install; and
+  extends the agent-operator HA render to assert `replicas: 2`,
+  PDB `minAvailable: 1`, and zone topologySpread.
+
+
 
 ### Added
 

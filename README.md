@@ -14,7 +14,7 @@ helm search repo nucel
 
 | Chart | Version | App Version | Description |
 |-------|---------|-------------|-------------|
-| nucel-server   | 0.1.37 | 0.5.27 | Self-hosted git platform with built-in CI/CD, container registry, and AI agent orchestration. |
+| nucel-server   | 0.1.38 | 0.5.27 | Self-hosted git platform with built-in CI/CD, container registry, and AI agent orchestration. |
 | agent-operator | 0.2.0  | 0.1.0  | Kubernetes operator for autonomous AI agent issue resolution. |
 | nucel-web      | 0.1.0  | 0.1.3  | Marketing site (SvelteKit) for nucel. |
 

@@ -69,7 +69,11 @@ jobs:
             --set secrets.oidcPrivateKey=ci-test-oidc-key \
             --set secrets.metricsToken=$(openssl rand -base64 32) \
             --set hpa.enabled=true \
+            --set hpa.minReplicas=3 \
+            --set hpa.maxReplicas=30 \
             --set podDisruptionBudget.enabled=true \
+            --set priorityClass.create=true \
+            --set priorityClassName=nucel-system \
             --set networkPolicy.enabled=true \
             --set basicAuth.enabled=true \
             --set basicAuth.password=ci-test-pass \
@@ -89,7 +93,66 @@ jobs:
           grep -q "kind: NetworkPolicy" /tmp/ns-ha.yaml
           grep -q "kind: PrometheusRule" /tmp/ns-ha.yaml
           grep -q "kind: ServiceMonitor" /tmp/ns-ha.yaml
+          grep -q "kind: PriorityClass" /tmp/ns-ha.yaml
           grep -q "basic-auth" /tmp/ns-ha.yaml
+          # HA SHAPES — assert the actual values, not just resource presence,
+          # so a regression that drops HPA bounds / AZ spread / RWX is caught.
+          echo "-> HPA min/max bounds"
+          grep -q "minReplicas: 3"  /tmp/ns-ha.yaml
+          grep -q "maxReplicas: 30" /tmp/ns-ha.yaml
+          echo "-> topologySpread across hostname AND zone"
+          grep -q "topologyKey: kubernetes.io/hostname"        /tmp/ns-ha.yaml
+          grep -q "topologyKey: topology.kubernetes.io/zone"   /tmp/ns-ha.yaml
+          echo "-> server pod carries the system PriorityClass"
+          grep -q "priorityClassName: nucel-system" /tmp/ns-ha.yaml
+          echo "-> all shared classes render RWX PVCs (registry/npm/artifacts/gitWorkspaces)"
+          test "$(grep -c 'ReadWriteMany' /tmp/ns-ha.yaml)" -ge 4
+
+      # The production overlay is the documented prod entrypoint; render it
+      # exactly as values-production.yaml ships (ExternalSecrets per-key map +
+      # secrets.create=false + S3/RWX storage) so a drift between the overlay
+      # and the templates fails CI instead of `helm upgrade` in prod.
+      - name: helm template — nucel-server (values-production.yaml overlay)
+        run: |
+          helm template t charts/nucel-server \
+            -f charts/nucel-server/values-production.yaml \
+            --set externalSecrets.secretStoreRef.name=aws-secrets-manager \
+            --set storage.classes.pages.s3.bucket=ci-bucket \
+            --set storage.classes.gitWorkspaces.s3.bucket=ci-bucket \
+            > /tmp/ns-prod.yaml
+          test -s /tmp/ns-prod.yaml
+          echo "-> ExternalSecret owns the Secret (per-key data map, no chart Secret)"
+          grep -q "kind: ExternalSecret" /tmp/ns-prod.yaml
+          grep -q "secretKey: NUCEL_OIDC_PRIVATE_KEY" /tmp/ns-prod.yaml
+          grep -q "secretKey: NUCEL_METRICS_TOKEN"   /tmp/ns-prod.yaml
+          # secrets.create=false in the overlay -> no chart-managed data Secret
+          if grep -qE "^kind: Secret$" /tmp/ns-prod.yaml; then
+            echo "FAIL: chart-managed Secret rendered despite secrets.create=false (would fight ESO)"
+            exit 1
+          fi
+          echo "-> HA shapes present in the overlay render"
+          grep -q "minReplicas: 3"  /tmp/ns-prod.yaml
+          grep -q "maxReplicas: 30" /tmp/ns-prod.yaml
+          grep -q "kind: PodDisruptionBudget" /tmp/ns-prod.yaml
+          grep -q "kind: PriorityClass" /tmp/ns-prod.yaml
+          grep -q "topologyKey: topology.kubernetes.io/zone" /tmp/ns-prod.yaml
+          test "$(grep -c 'ReadWriteMany' /tmp/ns-prod.yaml)" -ge 4
+
+      # The storage guard must FAIL a multi-replica install on RWO/emptyDir —
+      # assert it actually blocks (the regression that #244 fixed).
+      - name: helm template — storage guard rejects RWO multi-replica
+        run: |
+          if helm template t charts/nucel-server \
+               --set secrets.requireProductionValues=false \
+               --set prometheus.requireAuth=false \
+               --set hpa.enabled=true \
+               --set storage.classes.registry.accessMode=ReadWriteOnce \
+               > /tmp/ns-bad.yaml 2>/tmp/ns-bad-err.txt; then
+            echo "FAIL: storage guard did NOT reject RWO registry under HPA"
+            exit 1
+          fi
+          grep -qi "ReadWriteMany\|multi-replica\|ReadWriteOnce\|storage" /tmp/ns-bad-err.txt
+          echo "OK: storage.validate guard blocked RWO + HPA as expected"
 
       - name: helm template — agent-operator (default)
         run: |
@@ -101,11 +164,21 @@ jobs:
           helm template t charts/agent-operator \
             --set operator.replicas=2 \
             --set podDisruptionBudget.enabled=true \
+            --set podDisruptionBudget.minAvailable=1 \
             --set networkPolicy.enabled=true \
             --set serviceMonitor.enabled=true \
+            --set 'operator.topologySpreadConstraints[0].maxSkew=1' \
+            --set 'operator.topologySpreadConstraints[0].topologyKey=topology.kubernetes.io/zone' \
+            --set 'operator.topologySpreadConstraints[0].whenUnsatisfiable=ScheduleAnyway' \
+            --set 'operator.topologySpreadConstraints[0].labelSelector.matchLabels.app\.kubernetes\.io/name=agent-operator' \
             > /tmp/ao-ha.yaml
           grep -q "kind: PodDisruptionBudget" /tmp/ao-ha.yaml
           grep -q "kind: NetworkPolicy" /tmp/ao-ha.yaml
+          grep -q "kind: ServiceMonitor" /tmp/ao-ha.yaml
+          # HA SHAPES: 2-replica leader-elected operator, AZ spread, PDB floor.
+          grep -q "replicas: 2" /tmp/ao-ha.yaml
+          grep -q "minAvailable: 1" /tmp/ao-ha.yaml
+          grep -q "topologyKey: topology.kubernetes.io/zone" /tmp/ao-ha.yaml
 
       # Secret hygiene: with NO secret values supplied, every operator-provided
       # secret value must come from values — never a baked-in literal. The

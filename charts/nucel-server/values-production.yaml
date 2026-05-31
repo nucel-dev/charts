@@ -11,6 +11,13 @@
 
 secrets:
   requireProductionValues: true
+  # ExternalSecrets owns the Secret payload (externalSecrets.enabled below),
+  # so the chart-managed Secret template must stand down — otherwise both
+  # fight over the same metadata.name. ESO's ExternalSecret has
+  # creationPolicy: Owner and writes the same Secret name the Deployment's
+  # secretKeyRefs resolve. The `requireProductionValues` gate is skipped when
+  # create=false (the chart no longer renders those keys).
+  create: false
 
 # HPA: scale server replicas 3-30 at 60% CPU / 75% memory (scale push).
 # Floor 3 keeps 2 pods serving through a single node/zone loss while the
@@ -29,6 +36,40 @@ autoscaling:
 # PDB: tolerate a single unavailable replica during rolling updates.
 podDisruptionBudget:
   enabled: true
+
+# Multi-AZ spread. The chart's values.yaml already ships a two-axis
+# topologySpreadConstraints default (hostname + topology.kubernetes.io/zone,
+# maxSkew 1, ScheduleAnyway). With minReplicas: 3 above this lands one pod
+# per AZ on a 3-AZ cluster, so a single-zone outage never strands a
+# disproportionate share of capacity. It is restated here explicitly so a
+# production reader sees the AZ-spread intent in this overlay rather than
+# having to cross-reference values.yaml. whenUnsatisfiable stays
+# ScheduleAnyway (soft) so a transient zone capacity crunch never blocks a
+# rollout — the PDB + HPA carry availability, the spread is best-effort.
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: nucel
+        app.kubernetes.io/component: server
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: nucel
+        app.kubernetes.io/component: server
+
+# PriorityClass: the server is the platform's control plane (git + API +
+# SSH). Give it strict eviction ordering above background workers so node
+# pressure / Karpenter consolidation drains workers first. Opt-in because
+# PriorityClass is cluster-scoped; safe to disable if another install on
+# the cluster already owns the `nucel-system` name.
+priorityClass:
+  create: true
+priorityClassName: nucel-system
 
 # Schema migration runs as a pre-upgrade hook Job; server pods skip the
 # inline schema apply on startup (prevents races during rolling restarts).

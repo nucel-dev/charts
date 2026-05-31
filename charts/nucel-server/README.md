@@ -362,7 +362,13 @@ registry/npm/artifacts/gitWorkspaces → EFS `ReadWriteMany`).
 | `externalSecrets.refreshInterval` | `1h` | ESO polling cadence |
 | `externalSecrets.secretStoreRef.name` | `""` | name of your `ClusterSecretStore` / `SecretStore` |
 | `externalSecrets.secretStoreRef.kind` | `ClusterSecretStore` | or `SecretStore` |
-| `externalSecrets.remoteRef.key` | `""` | remote key whose JSON payload contains every `NUCEL_*` value |
+| `externalSecrets.remoteRef.key` | `""` | **Single-blob shape** — one remote key whose JSON payload contains every `NUCEL_*` value (rendered as `dataFrom.extract`) |
+| `externalSecrets.remoteRefs` | `{}` | **Per-key shape** — map of `<chartKey>: <remotePath>` (e.g. `oidcPrivateKey: nucel/prod/oidc-private-key`). Each entry becomes a `data[]` item; this is what `values-production.yaml` ships. Mutually informative with `remoteRef.key` — set at least one |
+
+> `externalSecrets.enabled: true` pairs with `secrets.create: false` so the
+> chart-managed Secret stands down and ESO owns the Secret payload (both target
+> the same name the Deployment's `secretKeyRef`s resolve). The production overlay
+> sets both.
 
 ### Agent workflows (AW)
 
@@ -424,6 +430,29 @@ registry/npm/artifacts/gitWorkspaces → EFS `ReadWriteMany`).
 | `podDisruptionBudget.enabled` | `true` | `minAvailable: 1` — pair with `server.replicas >= 2` |
 | `podDisruptionBudget.minAvailable` | `1` | |
 | `podDisruptionBudget.maxUnavailable` | `null` | mutually exclusive with `minAvailable` |
+| `topologySpreadConstraints` | two-axis (hostname + `topology.kubernetes.io/zone`, `maxSkew: 1`, `ScheduleAnyway`) | Multi-AZ spread for the server Deployment. With `minReplicas >= 3` lands one pod per AZ on a 3-AZ cluster so a single-zone outage never strands a disproportionate share of capacity. Set to `[]` to disable |
+| `affinity` | soft pod anti-affinity on hostname | Preferred (non-blocking) — spreads replicas across nodes without blocking single-node scheduling |
+| `priorityClass.create` | `false` | Renders cluster-scoped `nucel-system` (1000000) + `nucel-workload` (100000) PriorityClasses. Off by default (cluster-scoped names can collide). `values-production.yaml` turns it on |
+| `priorityClassName` | `""` | Stamped onto the server pod. Set to `nucel-system` (with `priorityClass.create: true`) so node pressure / Karpenter consolidation drains workers before the control plane |
+
+#### HA at a glance (production)
+
+The `values-production.yaml` overlay wires the full HA story coherently:
+
+| Concern | Mechanism | Production setting |
+|---|---|---|
+| Horizontal scale | HPA (CPU 60% / mem 75%) | `minReplicas: 3`, `maxReplicas: 30` |
+| Voluntary-disruption floor | PodDisruptionBudget | `minAvailable: 1` |
+| Node spread | soft pod anti-affinity (hostname) | on by default |
+| **AZ spread** | topologySpreadConstraints | hostname + zone, `maxSkew: 1` |
+| Eviction ordering | PriorityClass | `nucel-system` on the server |
+| Shared state across replicas | RWX PVCs (EFS) + S3 | pages/repos → S3, registry/npm/artifacts/gitWorkspaces → `ReadWriteMany` |
+| Secret delivery | ExternalSecrets (per-key) | `secrets.create: false`, ESO owns the Secret |
+| Alerting | PrometheusRule + ServiceMonitor | enabled |
+
+The chart's `nucel.storage.validate` guard **fails the install** if `replicas > 1`
+(or HPA on) is paired with an RWO/`emptyDir` shared class — so a multi-replica
+deploy can never silently regress to single-writer storage.
 
 ### Network policy
 

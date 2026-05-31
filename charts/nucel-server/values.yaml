@@ -694,11 +694,25 @@ externalSecrets:
     # ClusterSecretStore (cluster-scoped) or SecretStore (namespace-scoped).
     kind: ClusterSecretStore
   remoteRef:
-    # The single remote key whose JSON payload contains every
+    # Single-blob shape: one remote key whose JSON payload contains every
     # NUCEL_* the chart expects in the Secret (NUCEL_DB_PASS,
     # NUCEL_OIDC_PRIVATE_KEY, NUCEL_SSH_HOST_KEY, NUCEL_METRICS_TOKEN,
     # NUCEL_HOOK_SECRET, NUCEL_CI_RUNNER_TOKEN, NUCEL_OPENROUTER_KEY, …).
+    # Rendered as ExternalSecret `dataFrom.extract`.
     key: ""
+  # Per-key shape (alternative to remoteRef.key above): a map of
+  # <chartKey>: <remotePath>, one remote secret per logical value. Each
+  # entry renders as an ExternalSecret `data[]` item mapping the NUCEL_*
+  # env key to its remote path. This is what values-production.yaml uses.
+  # At least one of remoteRef.key / remoteRefs must be set when
+  # externalSecrets.enabled=true (the template fails fast otherwise).
+  # Valid chartKeys: dbPass, oidcPrivateKey, sessionKey, sshHostKey,
+  # metricsToken, hookSecret, ciRunnerToken, openrouterKey,
+  # anthropicApiKey, gitBotUser, gitBotPassword, s3AccessKeyId,
+  # s3SecretAccessKey, dbUser.
+  remoteRefs: {}
+  #  oidcPrivateKey: nucel/prod/oidc-private-key
+  #  metricsToken:   nucel/prod/metrics-token
 
 # -- Agent-workflow scheduler tick (Wave 7b/7c) cadence in seconds.
 # The in-process scheduler enqueues an aw_tick job every N seconds;
