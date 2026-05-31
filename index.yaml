@@ -10,6 +10,39 @@ entries:
           url: https://github.com/nucel-dev/agent-operator#readme
     apiVersion: v2
     appVersion: 0.1.0
+    created: "2026-05-31T00:40:16.451715831Z"
+    description: Kubernetes operator that drives AI agents to autonomously resolve
+      issues — connect any GitHub repo + Paperclip board, get PRs from an AI team.
+    digest: 47ca1a858e5b07d2ae12a1b8723341176c73801e19cd7132947943fcbb1e0aca
+    home: https://nucel.dev
+    keywords:
+    - operator
+    - kubernetes
+    - ai
+    - agents
+    - automation
+    - paperclip
+    - devops
+    maintainers:
+    - email: hello@nucel.dev
+      name: Nucel
+      url: https://nucel.dev
+    name: agent-operator
+    sources:
+    - https://github.com/nucel-dev/agent-operator
+    type: application
+    urls:
+    - https://github.com/nucel-dev/charts/releases/download/agent-operator-0.2.0/agent-operator-0.2.0.tgz
+    version: 0.2.0
+  - annotations:
+      artifacthub.io/license: Apache-2.0
+      artifacthub.io/links: |
+        - name: GitHub
+          url: https://github.com/nucel-dev/agent-operator
+        - name: Documentation
+          url: https://github.com/nucel-dev/agent-operator#readme
+    apiVersion: v2
+    appVersion: 0.1.0
     created: "2026-03-22T23:17:33.995018247Z"
     description: Kubernetes operator that drives AI agents to autonomously resolve
       issues — connect any GitHub repo + Paperclip board, get PRs from an AI team.
@@ -34,4 +67,38 @@ entries:
     urls:
     - https://github.com/nucel-dev/charts/releases/download/agent-operator-0.1.0/agent-operator-0.1.0.tgz
     version: 0.1.0
-generated: "2026-03-22T23:17:33.995023197Z"
+  nucel-server:
+  - annotations:
+      artifacthub.io/license: MIT
+      artifacthub.io/links: |
+        - name: GitHub
+          url: https://github.com/nucel-dev/nucel
+        - name: Documentation
+          url: https://github.com/nucel-dev/nucel#readme
+    apiVersion: v2
+    appVersion: 0.5.27
+    created: "2026-05-31T00:40:16.677899634Z"
+    description: Self-hosted git platform with built-in CI/CD, container registry,
+      and AI agent orchestration.
+    digest: 08a3ac7f7eb4e7f2c1c9b4cb5c0137951f7dc0acdb2892d85423671045e9b835
+    home: https://nucel.dev
+    keywords:
+    - git
+    - ci-cd
+    - devops
+    - self-hosted
+    - kubernetes
+    - ai-agents
+    - container-registry
+    maintainers:
+    - email: hello@nucel.dev
+      name: Nucel
+      url: https://nucel.dev
+    name: nucel-server
+    sources:
+    - https://github.com/nucel-dev/nucel
+    type: application
+    urls:
+    - https://github.com/nucel-dev/charts/releases/download/nucel-server-0.1.37/nucel-server-0.1.37.tgz
+    version: 0.1.37
+generated: "2026-05-31T00:40:16.677914602Z"
