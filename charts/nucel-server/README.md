@@ -283,6 +283,11 @@ reading the values file.
 | `surrealdb.image` | `surrealdb/surrealdb:v3.0.5` | Pinned — must match the schema and TiKV protocol |
 | `surrealdb.tikvEndpoint` | `""` | Non-empty enables TiKV mode and skips the chart-managed PVC |
 | `surrealdb.storage` | `20Gi` | Used only when `tikvEndpoint` is empty |
+| `surrealdb.containerSecurityContext` | drop-ALL / no-priv-escalation / RuntimeDefault | Container-level restricted profile on the in-chart SurrealDB container (the pod already runs non-root uid/gid 1000) |
+| `surrealdb.networkPolicy.enabled` | `false` | Audit #22. Restricts who can reach SurrealDB's plaintext `ws://:8000`. `deploy=true` → ingress lock-down on the DB pods (only nucel clients); `deploy=false` → egress lock-down on the client pods (firewall the DB on its own side too). See PRODUCTION_HARDENING.md → "SurrealDB network isolation" |
+| `surrealdb.networkPolicy.ingress.from` | `[]` | Extra peers admitted to `:8000` when `deploy=true` (in addition to the in-namespace nucel clients) |
+| `surrealdb.networkPolicy.externalPeers` | `[]` | When `deploy=false`: the DB endpoint peer(s) the nucel client pods may reach on `:8000`. Empty = no egress object rendered |
+| `surrealdb.networkPolicy.port` | `8000` | SurrealDB ws port the policy gates |
 
 ### Storage
 
@@ -465,6 +470,26 @@ silently no-op). Enable to restrict ingress/egress for the server pods.
 | `networkPolicy.ingress.from` | `[]` | Extra ingress `from` peers (`namespaceSelector` / `podSelector` / `ipBlock`). Empty = allow the server ports from any source |
 | `networkPolicy.egress.denyAll` | `false` | When `true`, only DNS + `egress.to` entries are permitted; otherwise all egress is allowed |
 | `networkPolicy.egress.to` | `[]` | Allowed egress peers when `denyAll: true` |
+
+This policy selects the nucel **client** pods (server / worker). To restrict
+who can reach **SurrealDB** itself — which speaks plaintext `ws://:8000` — use
+the separate `surrealdb.networkPolicy.*` block (see the SurrealDB table above
+and PRODUCTION_HARDENING.md → "SurrealDB network isolation").
+
+### Pod / container securityContext
+
+All nucel workload pods (server, worker, worker-pool, migration Job, seed Job)
+and the in-chart SurrealDB container ship a restricted `securityContext` by
+default: `allowPrivilegeEscalation: false`, `capabilities.drop: ["ALL"]`,
+`seccompProfile: RuntimeDefault`. `runAsNonRoot` / `readOnlyRootFilesystem` are
+left **off** for the nucel pods because the published server image runs as root
+(uid 0) — flip them on only against a non-root rebuilt image. See
+PRODUCTION_HARDENING.md → "Non-root + restricted securityContext".
+
+| Key | Default | Notes |
+|---|---|---|
+| `podSecurityContext` | `seccompProfile: RuntimeDefault` | Pod-level SC for server / worker / worker-pool / migrate / seed. Extend with `runAsNonRoot` / `runAsUser` / `fsGroup` on a non-root image |
+| `containerSecurityContext` | drop-ALL / no-priv-escalation / RuntimeDefault | Container-level restricted profile for the same workloads |
 
 ### Basic-auth gate (pre-launch / staging)
 

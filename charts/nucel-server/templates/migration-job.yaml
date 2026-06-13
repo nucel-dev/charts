@@ -42,10 +42,12 @@ spec:
     spec:
       restartPolicy: Never
       serviceAccountName: {{ include "nucel.serviceAccountName" . }}
+      {{- include "nucel.podSecurityContext" . | nindent 6 }}
       containers:
         - name: migrate
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "nucel.containerSecurityContext" . | nindent 10 }}
           # Same binary as the server, gated by NUCEL_MIGRATE_ONLY=1.
           command: ["/usr/local/bin/nucel-server"]
           envFrom:

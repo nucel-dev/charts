@@ -316,6 +316,71 @@ surrealdb:
     limits:
       cpu: 1000m
       memory: 1Gi
+  # Container-level securityContext for the SurrealDB container. The
+  # StatefulSet already ships a pod-level securityContext
+  # (runAsNonRoot/runAsUser/runAsGroup/fsGroup 1000 — the surrealdb image
+  # runs fine non-root). This adds the container-level restricted profile
+  # to match the server/worker pods: drop ALL caps, no privilege
+  # escalation, RuntimeDefault seccomp. `readOnlyRootFilesystem` is left
+  # off because SurrealDB writes its embedded RocksDB/surrealkv store under
+  # /data (a PVC mount) but may also touch the rootfs for temp files; flip
+  # it on if your image tolerates it. Set to `{}` to emit nothing.
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+    # readOnlyRootFilesystem: true   # enable only if the image tolerates it
+  # -- NetworkPolicy guarding SurrealDB (audit #22).
+  #
+  # SurrealDB speaks plaintext ws:// on :8000 with no transport encryption,
+  # so any pod that can route to its Service can attempt to authenticate
+  # (and brute-force NUCEL_DB_USER/NUCEL_DB_PASS). This policy restricts
+  # who may reach it.
+  #
+  # Two shapes, picked by `surrealdb.deploy`:
+  #   - deploy=true  → the chart owns the SurrealDB StatefulSet, so it
+  #                    renders an INGRESS NetworkPolicy on the surrealdb
+  #                    pods that allows :8000 ONLY from the nucel client
+  #                    pods (server + worker + worker-pool + seed +
+  #                    migrate — all carry the chart selector labels
+  #                    app.kubernetes.io/name=<chart> + instance=<release>)
+  #                    plus any extra peers under `ingress.from`. Every
+  #                    other source is denied (default-deny once a
+  #                    NetworkPolicy selects the pod).
+  #   - deploy=false → SurrealDB is external/managed (Terraform
+  #                    modules/surrealdb). The chart can't put an ingress
+  #                    policy on pods it doesn't own, so it renders an
+  #                    EGRESS NetworkPolicy on the nucel client pods that
+  #                    only permits DB egress to `externalPeers` (the
+  #                    SurrealDB endpoint CIDR/namespace). You must ALSO
+  #                    firewall the DB side — see PRODUCTION_HARDENING.md
+  #                    "SurrealDB network isolation".
+  #
+  # Off by default so the chart still renders on clusters whose CNI does
+  # not enforce NetworkPolicy (Calico/Cilium/etc. required for it to bite).
+  networkPolicy:
+    enabled: false
+    # Extra ingress `from` peers allowed to reach :8000 when deploy=true
+    # (in addition to the in-namespace nucel client pods, which are always
+    # allowed). Use to admit a DB admin/backup pod in another namespace.
+    # Each entry is a standard NetworkPolicyPeer
+    # (namespaceSelector / podSelector / ipBlock).
+    ingress:
+      from: []
+    # When deploy=false: the peers the nucel client pods are allowed to
+    # reach on the DB port for egress. Empty = no egress restriction is
+    # rendered (the policy degrades to ingress-only / no-op for the
+    # external case). Set this to the SurrealDB endpoint's ipBlock or the
+    # namespaceSelector of the namespace that hosts the external DB.
+    #   externalPeers:
+    #     - ipBlock:
+    #         cidr: 10.0.32.0/20      # SurrealDB subnet
+    externalPeers: []
+    # The port SurrealDB listens on (ws). Matches the Service/containerPort.
+    port: 8000
 
 # -- Persistent storage sizes
 #

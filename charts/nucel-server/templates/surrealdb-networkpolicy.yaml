@@ -1,0 +1,104 @@
+{{- if and .Values.surrealdb.networkPolicy .Values.surrealdb.networkPolicy.enabled }}
+{{- $np := .Values.surrealdb.networkPolicy }}
+{{- $port := $np.port | default 8000 }}
+# ─────────────────────────────────────────────────────────────────────────────
+# SurrealDB network isolation (audit #22).
+#
+# SurrealDB speaks plaintext ws:// on :{{ $port }} with no transport
+# encryption. Without a policy, ANY pod that can route to the Service can
+# attempt to authenticate and brute-force NUCEL_DB_USER / NUCEL_DB_PASS.
+#
+# This file renders a different shape depending on whether the chart owns
+# the SurrealDB workload:
+#
+#   surrealdb.deploy=true  → INGRESS lock-down on the surrealdb pods.
+#   surrealdb.deploy=false → EGRESS lock-down on the nucel client pods
+#                            (the DB itself is external/managed; firewall
+#                            it on its own side too — see
+#                            PRODUCTION_HARDENING.md).
+#
+# Requires a CNI that enforces NetworkPolicy (Calico, Cilium, …). On a CNI
+# that ignores policy these objects render but do nothing — hence opt-in.
+# ─────────────────────────────────────────────────────────────────────────────
+{{- if .Values.surrealdb.deploy }}
+# In-chart SurrealDB StatefulSet: default-deny ingress to :{{ $port }},
+# allow ONLY the in-namespace nucel client pods (server + worker +
+# worker-pool + seed + migrate all carry app.kubernetes.io/name=nucel),
+# plus any extra peers under surrealdb.networkPolicy.ingress.from.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "nucel.fullname" . }}-surrealdb
+  namespace: {{ include "nucel.namespace" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "nucel.surrealdbLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # nucel client pods in this namespace. server / worker / worker-pool
+        # / seed / migrate all carry the chart selector labels
+        # (app.kubernetes.io/name={{ include "nucel.name" . }} +
+        # app.kubernetes.io/instance={{ .Release.Name }}, from
+        # nucel.selectorLabels) — admit them, deny everything else.
+        - podSelector:
+            matchLabels:
+              {{- include "nucel.selectorLabels" . | nindent 14 }}
+        {{- with $np.ingress.from }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ $port }}
+{{- else }}
+# External / managed SurrealDB (surrealdb.deploy=false — Terraform
+# modules/surrealdb owns the StatefulSet). The chart can't attach an
+# ingress policy to pods it does not own, so it restricts the nucel client
+# pods' EGRESS on the DB port to the configured externalPeers instead.
+#
+# This is HALF the control. The DB side MUST also be firewalled (security
+# group / NetworkPolicy in the DB's own namespace) so other workloads in
+# the cluster can't reach :{{ $port }}. See PRODUCTION_HARDENING.md
+# "SurrealDB network isolation".
+{{- if $np.externalPeers }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "nucel.fullname" . }}-surrealdb-egress
+  namespace: {{ include "nucel.namespace" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+spec:
+  # Applies to every nucel pod that talks to the DB (server / worker /
+  # worker-pool / seed / migrate).
+  podSelector:
+    matchLabels:
+      {{- include "nucel.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # DNS so the DB hostname resolves.
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # The external SurrealDB endpoint on the DB port only.
+    - to:
+        {{- toYaml $np.externalPeers | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: {{ $port }}
+{{- else }}
+# surrealdb.networkPolicy.enabled=true with deploy=false but no
+# externalPeers set: nothing to scope egress to. Set
+# surrealdb.networkPolicy.externalPeers to the DB endpoint (ipBlock /
+# namespaceSelector) to render the egress lock-down, and firewall the DB
+# on its own side. (No object rendered here to avoid an over-broad policy.)
+{{- end }}
+{{- end }}
+{{- end }}

@@ -26,6 +26,7 @@ spec:
       containers:
         - name: surrealdb
           image: {{ .Values.surrealdb.image }}
+          {{- include "nucel.surrealdbContainerSecurityContext" . | nindent 10 }}
           args:
             - start
             - --log

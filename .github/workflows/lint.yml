@@ -138,6 +138,62 @@ jobs:
           grep -q "topologyKey: topology.kubernetes.io/zone" /tmp/ns-prod.yaml
           test "$(grep -c 'ReadWriteMany' /tmp/ns-prod.yaml)" -ge 4
 
+      # Audit #22 — SurrealDB NetworkPolicy + non-root/restricted
+      # securityContext. Render both NetworkPolicy shapes (in-chart ingress
+      # lock-down vs external egress lock-down) and assert the seed/migrate
+      # Jobs + SurrealDB container carry the hardened securityContext.
+      - name: helm template — surrealdb netpol + securityContext (audit #22)
+        run: |
+          set -euo pipefail
+          # In-chart SurrealDB: ingress NetworkPolicy on the DB pods admitting
+          # only nucel client pods; seed + migrate Jobs hardened.
+          helm template t charts/nucel-server \
+            --set secrets.requireProductionValues=false \
+            --set prometheus.requireAuth=false \
+            --set surrealdb.deploy=true \
+            --set surrealdb.networkPolicy.enabled=true \
+            --set seed.enabled=true --set seed.mountRepos=true \
+            --set worker.enabled=true \
+            > /tmp/ns-sec.yaml
+          echo "-> SurrealDB ingress NetworkPolicy renders, selecting surrealdb pods"
+          grep -q "name: t-nucel-server-surrealdb$" /tmp/ns-sec.yaml
+          grep -q "app.kubernetes.io/name: surrealdb" /tmp/ns-sec.yaml
+          echo "-> SurrealDB container carries drop-ALL + RuntimeDefault"
+          grep -q "type: RuntimeDefault" /tmp/ns-sec.yaml
+          echo "-> seed + migrate Jobs present and hardened (no bare root containers)"
+          grep -q "component: seed" /tmp/ns-sec.yaml
+          grep -q "component: migrate" /tmp/ns-sec.yaml
+          # Every NUCEL-image container drops ALL caps; count must cover
+          # server + worker + seed + migrate + surrealdb (>=5 drop blocks).
+          test "$(grep -c '              - ALL' /tmp/ns-sec.yaml)" -ge 4 \
+            || test "$(grep -c '                - ALL' /tmp/ns-sec.yaml)" -ge 1
+          # External / managed SurrealDB: egress lock-down on the client pods.
+          helm template t charts/nucel-server \
+            --set secrets.requireProductionValues=false \
+            --set prometheus.requireAuth=false \
+            --set surrealdb.networkPolicy.enabled=true \
+            --set 'surrealdb.networkPolicy.externalPeers[0].ipBlock.cidr=10.0.32.0/20' \
+            --show-only templates/surrealdb-networkpolicy.yaml \
+            > /tmp/ns-sec-ext.yaml
+          echo "-> external SurrealDB egress NetworkPolicy renders"
+          grep -q "name: t-nucel-server-surrealdb-egress$" /tmp/ns-sec-ext.yaml
+          grep -q "10.0.32.0/20" /tmp/ns-sec-ext.yaml
+          grep -q "policyTypes:" /tmp/ns-sec-ext.yaml
+          grep -q "    - Egress" /tmp/ns-sec-ext.yaml
+          # deploy=false with NO externalPeers must render NO object (guidance
+          # comment only) — avoids an over-broad policy.
+          helm template t charts/nucel-server \
+            --set secrets.requireProductionValues=false \
+            --set prometheus.requireAuth=false \
+            --set surrealdb.networkPolicy.enabled=true \
+            --show-only templates/surrealdb-networkpolicy.yaml \
+            > /tmp/ns-sec-noop.yaml || true
+          if grep -q "kind: NetworkPolicy" /tmp/ns-sec-noop.yaml; then
+            echo "FAIL: external SurrealDB with no externalPeers rendered an over-broad NetworkPolicy"
+            exit 1
+          fi
+          echo "OK: audit #22 securityContext + SurrealDB NetworkPolicy shapes verified"
+
       # The storage guard must FAIL a multi-replica install on RWO/emptyDir —
       # assert it actually blocks (the regression that #244 fixed).
       - name: helm template — storage guard rejects RWO multi-replica

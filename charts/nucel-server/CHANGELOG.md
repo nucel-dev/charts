@@ -9,6 +9,56 @@ release.
 > Generated from `git log -- charts/nucel-server/`. Each entry lists the
 > short SHA, date, and a summary of the user-visible effect.
 
+## [0.1.39] — 2026-06-14 (appVersion 0.5.27)
+
+### Added
+
+- **SurrealDB NetworkPolicy (audit #22).** SurrealDB speaks plaintext
+  `ws://` on `:8000` with no transport encryption, so any pod that could
+  route to its Service could attempt to authenticate and brute-force the DB
+  credentials. New `templates/surrealdb-networkpolicy.yaml`, gated behind
+  `surrealdb.networkPolicy.enabled` (off by default — needs a
+  policy-enforcing CNI), renders one of two shapes:
+  - `surrealdb.deploy=true` → an **ingress** policy on the in-chart
+    SurrealDB pods that admits `:8000` ONLY from the nucel client pods
+    (server / worker / worker-pool / seed / migrate, selected by the chart
+    selector labels) plus any extra `ingress.from` peers. Default-deny for
+    everything else.
+  - `surrealdb.deploy=false` (external/managed DB) → an **egress** policy on
+    the nucel client pods restricting DB-port egress to
+    `surrealdb.networkPolicy.externalPeers` (DNS always allowed). The DB
+    side must also be firewalled on its own side — documented in
+    `PRODUCTION_HARDENING.md` → "SurrealDB network isolation".
+- **Container-level securityContext on the in-chart SurrealDB container.**
+  The StatefulSet already ran the pod non-root (uid/gid 1000); it now also
+  carries the restricted container profile (drop ALL caps,
+  `allowPrivilegeEscalation: false`, `seccompProfile: RuntimeDefault`) via
+  the new `surrealdb.containerSecurityContext` value.
+
+### Changed
+
+- **securityContext now applied to the seed + migration Jobs (audit #22).**
+  `templates/seed-job.yaml` and `templates/migration-job.yaml` previously
+  ran with no pod/container securityContext at all. They now reuse the
+  shared `podSecurityContext` / `containerSecurityContext` values (same
+  hardened defaults as the server/worker pods). The seed Job's `mountRepos`
+  path merges its required `fsGroup: 0` override on top of the shared
+  profile instead of replacing it, and the root `fix-data-perms`
+  initContainer drops ALL caps except the `CHOWN`/`FOWNER`/`DAC_OVERRIDE`
+  it needs for the PVC chown.
+
+### Notes
+
+- The published `ghcr.io/nucel-dev/nucel-server` image still runs as **root**
+  (uid 0), so `runAsNonRoot: true` / `readOnlyRootFilesystem: true` remain
+  commented-out in `podSecurityContext` / `containerSecurityContext` — the
+  rest of the restricted profile (drop-ALL, no-priv-escalation, seccomp) is
+  on by default. Flipping the non-root pair on the stock image crash-loops
+  the pod; rebuilding a non-root server image is tracked as a follow-up.
+- NetworkPolicy enforcement can only be verified on a live cluster running a
+  CNI that honours it (Calico, Cilium). `helm template` + `helm lint` cover
+  the render correctness here.
+
 ## [0.1.38] — 2026-05-31 (appVersion 0.5.27)
 
 ### Fixed
