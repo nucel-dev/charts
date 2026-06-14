@@ -165,8 +165,9 @@ jobs:
           grep -q "component: migrate" /tmp/ns-sec.yaml
           # Every NUCEL-image container drops ALL caps; count must cover
           # server + worker + seed + migrate + surrealdb (>=5 drop blocks).
-          test "$(grep -c '              - ALL' /tmp/ns-sec.yaml)" -ge 4 \
-            || test "$(grep -c '                - ALL' /tmp/ns-sec.yaml)" -ge 1
+          # Indentation-agnostic (a future re-nest of a securityContext block
+          # must not silently hollow out this assertion).
+          test "$(grep -cE '^\s*- ALL$' /tmp/ns-sec.yaml)" -ge 5
           # External / managed SurrealDB: egress lock-down on the client pods.
           helm template t charts/nucel-server \
             --set secrets.requireProductionValues=false \
@@ -192,6 +193,59 @@ jobs:
             echo "FAIL: external SurrealDB with no externalPeers rendered an over-broad NetworkPolicy"
             exit 1
           fi
+          # PR #1 MAJOR-1: deploy=false egress is default-deny for the client
+          # pods, so the default escape hatch (allowAllOtherEgress=true) MUST
+          # emit a broad allow-all egress rule alongside the DB-port rule —
+          # otherwise enabling the policy severs S3/SMTP/etc.
+          echo "-> escape hatch: default render includes broad allow-all egress (- {})"
+          grep -qE '^    - \{\}$' /tmp/ns-sec-ext.yaml
+          # True lock-down (allowAllOtherEgress=false) must render DNS + DB
+          # port + the operator-supplied extraEgress, and NO allow-all rule.
+          helm template t charts/nucel-server \
+            --set secrets.requireProductionValues=false \
+            --set prometheus.requireAuth=false \
+            --set surrealdb.networkPolicy.enabled=true \
+            --set surrealdb.networkPolicy.allowAllOtherEgress=false \
+            --set 'surrealdb.networkPolicy.externalPeers[0].ipBlock.cidr=10.0.32.0/20' \
+            --set 'surrealdb.networkPolicy.extraEgress[0].ports[0].protocol=TCP' \
+            --set 'surrealdb.networkPolicy.extraEgress[0].ports[0].port=443' \
+            --show-only templates/surrealdb-networkpolicy.yaml \
+            > /tmp/ns-sec-lock.yaml
+          echo "-> true lock-down: DNS(53) + DB(8000) + extraEgress(443), no allow-all"
+          grep -q "port: 53" /tmp/ns-sec-lock.yaml
+          grep -q "port: 8000" /tmp/ns-sec-lock.yaml
+          grep -q "port: 443" /tmp/ns-sec-lock.yaml
+          if grep -qE '^    - \{\}$' /tmp/ns-sec-lock.yaml; then
+            echo "FAIL: allowAllOtherEgress=false still rendered a broad allow-all egress rule"
+            exit 1
+          fi
+          # PR #1 MAJOR-2: requesting a lock-down while the main networkPolicy
+          # is on in its default allow-all egress mode is a silent no-op
+          # (NetworkPolicies union). The chart MUST fail fast.
+          echo "-> additive-conflict guard fails fast on the silent no-op combo"
+          if helm template t charts/nucel-server \
+            --set secrets.requireProductionValues=false \
+            --set prometheus.requireAuth=false \
+            --set networkPolicy.enabled=true \
+            --set surrealdb.networkPolicy.enabled=true \
+            --set surrealdb.networkPolicy.allowAllOtherEgress=false \
+            --set 'surrealdb.networkPolicy.externalPeers[0].ipBlock.cidr=10.0.32.0/20' \
+            --show-only templates/surrealdb-networkpolicy.yaml > /dev/null 2>&1; then
+            echo "FAIL: expected fail-fast on networkPolicy.enabled + denyAll=false + lock-down, but render succeeded"
+            exit 1
+          fi
+          # Same combo but with denyAll=true must render (no conflict).
+          helm template t charts/nucel-server \
+            --set secrets.requireProductionValues=false \
+            --set prometheus.requireAuth=false \
+            --set networkPolicy.enabled=true \
+            --set networkPolicy.egress.denyAll=true \
+            --set surrealdb.networkPolicy.enabled=true \
+            --set surrealdb.networkPolicy.allowAllOtherEgress=false \
+            --set 'surrealdb.networkPolicy.externalPeers[0].ipBlock.cidr=10.0.32.0/20' \
+            --set 'surrealdb.networkPolicy.extraEgress[0].ports[0].protocol=TCP' \
+            --set 'surrealdb.networkPolicy.extraEgress[0].ports[0].port=443' \
+            --show-only templates/surrealdb-networkpolicy.yaml > /dev/null
           echo "OK: audit #22 securityContext + SurrealDB NetworkPolicy shapes verified"
 
       # The storage guard must FAIL a multi-replica install on RWO/emptyDir —

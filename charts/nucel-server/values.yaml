@@ -361,6 +361,30 @@ surrealdb:
   #
   # Off by default so the chart still renders on clusters whose CNI does
   # not enforce NetworkPolicy (Calico/Cilium/etc. required for it to bite).
+  #
+  # !!  EGRESS DEFAULT-DENY WARNING (deploy=false path) !!
+  # When deploy=false this block renders an EGRESS NetworkPolicy on the
+  # nucel client pods (server / worker / worker-pool / seed / migrate). A
+  # NetworkPolicy with policyTypes:[Egress] makes egress DEFAULT-DENY for
+  # the pods it selects — only the rules it lists are allowed. The server
+  # needs FAR more than the DB port: S3 over HTTPS:443 (NUCEL_S3_* wired in
+  # configmap.yaml), SMTP, outbound webhooks, the OIDC issuer, git remotes
+  # and container registries. So this policy ships an escape hatch
+  # (`allowAllOtherEgress: true`, below) that keeps all non-DB egress open
+  # by default — turning the policy on does NOT silently sever S3/SMTP/etc.
+  # Flip `allowAllOtherEgress: false` for a TRUE lock-down, and then you
+  # MUST enumerate every required peer under `extraEgress` (443 to
+  # S3/OIDC/webhooks/registry, the SMTP port, …) or the platform breaks.
+  #
+  # !!  ADDITIVE-POLICY CONFLICT (deploy=false path) !!
+  # NetworkPolicies are additive (union). With the main `networkPolicy`
+  # block ALSO enabled at its default `egress.denyAll: false`, that policy
+  # emits a `- {}` allow-all egress rule which UNIONs with — and nullifies
+  # — any egress restriction here. The chart fails fast on that exact silent
+  # no-op: a true SurrealDB egress lock-down (allowAllOtherEgress=false)
+  # requires EITHER networkPolicy.enabled=false OR
+  # networkPolicy.egress.denyAll=true. See PRODUCTION_HARDENING.md →
+  # "SurrealDB network isolation".
   networkPolicy:
     enabled: false
     # Extra ingress `from` peers allowed to reach :8000 when deploy=true
@@ -379,6 +403,34 @@ surrealdb:
     #     - ipBlock:
     #         cidr: 10.0.32.0/20      # SurrealDB subnet
     externalPeers: []
+    # deploy=false EGRESS ESCAPE HATCH. When true (default), the egress
+    # policy ALSO emits a broad `- {}` allow-all rule so the client pods
+    # keep their S3/SMTP/webhook/OIDC/git/registry egress — i.e. enabling
+    # the policy scopes the DB port WITHOUT severing everything else. The
+    # DB-port rule is then informational (the union with `- {}` allows all
+    # egress anyway); use it together with a DB-side firewall (the real
+    # control for the external case). Set to FALSE for a true egress
+    # lock-down — only DNS, the DB port and `extraEgress` survive, so you
+    # must enumerate every other required peer under `extraEgress`.
+    allowAllOtherEgress: true
+    # deploy=false, allowAllOtherEgress=false: additional egress rules the
+    # operator MUST supply so the server's non-DB traffic keeps flowing
+    # under the lock-down. Each entry is a full NetworkPolicyEgressRule
+    # ({ to: [...], ports: [...] }). Example covering S3/HTTPS + SMTP:
+    #   extraEgress:
+    #     - ports:
+    #         - { protocol: TCP, port: 443 }   # S3 / OIDC / webhooks / registry
+    #         - { protocol: TCP, port: 587 }   # SMTP submission
+    extraEgress: []
+    # deploy=false: optional `to` peers that scope the DNS (port 53) egress
+    # rule. Empty = DNS allowed to anywhere (matches the main client
+    # policy). Set to the kube-dns pods to tighten it, e.g.:
+    #   dnsPeers:
+    #     - namespaceSelector:
+    #         matchLabels: { kubernetes.io/metadata.name: kube-system }
+    #       podSelector:
+    #         matchLabels: { k8s-app: kube-dns }
+    dnsPeers: []
     # The port SurrealDB listens on (ws). Matches the Service/containerPort.
     port: 8000
 

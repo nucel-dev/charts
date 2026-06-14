@@ -441,7 +441,7 @@ surrealdb:
 This is the production default — `modules/surrealdb` (Terraform) owns the
 StatefulSet, so the chart can't attach an ingress policy to pods it doesn't
 manage. Instead it renders an **egress** policy on the nucel client pods
-that only permits DB-port egress to the endpoint(s) you list under
+that permits DB-port egress to the endpoint(s) you list under
 `externalPeers` (DNS is always allowed). With no `externalPeers` set, no
 object is rendered (rather than an over-broad allow-all):
 
@@ -454,6 +454,71 @@ surrealdb:
       - ipBlock:
           cidr: 10.0.32.0/20      # the SurrealDB subnet / endpoint
 ```
+
+> **!! READ THIS BEFORE ENABLING — the egress policy is a full default-deny
+> allowlist, not a DB-port add-on. !!**
+>
+> A NetworkPolicy with `policyTypes: [Egress]` makes egress **default-deny**
+> for every pod it selects. This policy selects the server / worker /
+> worker-pool / seed / migrate pods, which need *far* more than the DB port:
+> the server talks to **S3 over HTTPS:443** (`NUCEL_S3_*` wired in
+> `configmap.yaml`), **SMTP**, outbound **webhooks**, the **OIDC** issuer,
+> **git** remotes and container **registries**. If this policy listed only
+> DNS + the DB port, enabling it standalone would **sever all of that** and
+> break the platform in non-obvious ways.
+>
+> So the chart ships an **escape hatch**, `allowAllOtherEgress` (default
+> `true`): when on, the egress policy *also* emits a broad `- {}` allow-all
+> rule so non-DB egress keeps flowing. In that mode the DB-port rule is
+> informational — the real control for the external case is the DB-side
+> firewall (below). Turning the policy on therefore does **not** silently
+> cut off S3/SMTP/etc.
+>
+> For a **true egress lock-down**, set `allowAllOtherEgress: false`. Then
+> only DNS, the DB port and whatever you enumerate under `extraEgress`
+> survive — so you **must** list every other peer the server needs:
+>
+> ```yaml
+> surrealdb:
+>   networkPolicy:
+>     enabled: true
+>     allowAllOtherEgress: false
+>     externalPeers:
+>       - ipBlock: { cidr: 10.0.32.0/20 }
+>     extraEgress:
+>       - ports:
+>           - { protocol: TCP, port: 443 }   # S3 / OIDC / webhooks / registry
+>           - { protocol: TCP, port: 587 }   # SMTP submission
+>     # Optional: scope DNS to kube-dns instead of port 53 to anywhere.
+>     dnsPeers:
+>       - namespaceSelector:
+>           matchLabels: { kubernetes.io/metadata.name: kube-system }
+>         podSelector:
+>           matchLabels: { k8s-app: kube-dns }
+> ```
+
+> **!! ADDITIVE-POLICY CONFLICT with the main `networkPolicy` block. !!**
+>
+> Kubernetes **unions** all NetworkPolicies that select a pod. The main
+> `networkPolicy` block (separate from this one) also selects the server /
+> worker pods, and at its default `networkPolicy.egress.denyAll: false` it
+> emits a `- {}` **allow-all egress** rule. That allow-all UNIONs with — and
+> **nullifies** — any egress restriction here: the SurrealDB egress
+> lock-down silently becomes a **no-op** in the common default combo.
+>
+> The chart **fails fast** on that exact footgun: requesting a true
+> lock-down (`allowAllOtherEgress: false`) while `networkPolicy.enabled:
+> true` *and* `networkPolicy.egress.denyAll: false` aborts `helm
+> install/upgrade` with an explanatory error. To run a real SurrealDB egress
+> lock-down you must pick ONE of:
+>
+> - `networkPolicy.enabled: false` (no competing egress policy), **or**
+> - `networkPolicy.egress.denyAll: true` (the main policy stops emitting
+>   `- {}` and instead allows only DNS + its own `egress.to` list — make sure
+>   that list also covers the DB port and the same S3/SMTP/etc. peers), **or**
+> - `surrealdb.networkPolicy.allowAllOtherEgress: true` (accept that this
+>   policy is informational, not a restriction — the union is then
+>   intentional and the DB-side firewall is the control).
 
 **The egress policy is only half the control.** When the DB is external you
 MUST also firewall it on its own side so other cluster workloads can't
@@ -482,14 +547,28 @@ blocks — `podSecurityContext` (pod-level) and `containerSecurityContext`
 (container-level) — wired through the `nucel.podSecurityContext` /
 `nucel.containerSecurityContext` helpers. Coverage:
 
+A ✅ below means the on-by-default hardened profile is applied
+(`allowPrivilegeEscalation: false`, `capabilities.drop: ["ALL"]`,
+`seccompProfile: RuntimeDefault`). It is **not** a claim of full
+PSS-`restricted` compliance for the nucel pods: they run the **root** server
+image, so `runAsNonRoot` / `readOnlyRootFilesystem` stay off and the pods
+still run a root process (drop-ALL caps limits the blast radius). Full
+`restricted` for those pods requires the non-root image rebuild tracked
+below. The SurrealDB pod is the exception — it genuinely runs non-root.
+
 | Workload | Pod SC | Container SC |
 |----------|--------|--------------|
-| `nucel-server` Deployment | ✅ | ✅ |
-| `nucel-worker` Deployment | ✅ | ✅ |
-| `nucel-worker-<pool>` Deployments | ✅ | ✅ |
-| migration Job (`*-migrate`) | ✅ | ✅ |
-| seed Job (`nucel-seed`) | ✅ | ✅ |
-| SurrealDB StatefulSet | ✅ (uid/gid 1000) | ✅ |
+| `nucel-server` Deployment | ✅ partial¹ | ✅ partial¹ |
+| `nucel-worker` Deployment | ✅ partial¹ | ✅ partial¹ |
+| `nucel-worker-<pool>` Deployments | ✅ partial¹ | ✅ partial¹ |
+| migration Job (`*-migrate`) | ✅ partial¹ | ✅ partial¹ |
+| seed Job (`nucel-seed`) | ✅ partial¹ | ✅ partial¹ |
+| SurrealDB StatefulSet | ✅ (uid/gid 1000, non-root) | ✅ |
+
+> ¹ **partial** = drop-ALL caps + no-priv-escalation + RuntimeDefault seccomp
+> are on, but `runAsNonRoot` / `readOnlyRootFilesystem` are off (root image),
+> so this is not yet full PSS-`restricted`. Rebuild a non-root image to close
+> the gap (below).
 
 **What is on by default** (safe for the current root server image,
 satisfies most of Pod Security "restricted"):
