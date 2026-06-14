@@ -276,7 +276,7 @@ jobs:
             --set podDisruptionBudget.enabled=true \
             --set podDisruptionBudget.minAvailable=1 \
             --set networkPolicy.enabled=true \
-            --set serviceMonitor.enabled=true \
+            --set monitoring.serviceMonitor.enabled=true \
             --set 'operator.topologySpreadConstraints[0].maxSkew=1' \
             --set 'operator.topologySpreadConstraints[0].topologyKey=topology.kubernetes.io/zone' \
             --set 'operator.topologySpreadConstraints[0].whenUnsatisfiable=ScheduleAnyway' \
