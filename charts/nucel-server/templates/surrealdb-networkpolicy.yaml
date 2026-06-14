@@ -1,0 +1,167 @@
+{{- if and .Values.surrealdb.networkPolicy .Values.surrealdb.networkPolicy.enabled }}
+{{- $np := .Values.surrealdb.networkPolicy }}
+{{- $port := $np.port | default 8000 }}
+# ─────────────────────────────────────────────────────────────────────────────
+# SurrealDB network isolation (audit #22).
+#
+# SurrealDB speaks plaintext ws:// on :{{ $port }} with no transport
+# encryption. Without a policy, ANY pod that can route to the Service can
+# attempt to authenticate and brute-force NUCEL_DB_USER / NUCEL_DB_PASS.
+#
+# This file renders a different shape depending on whether the chart owns
+# the SurrealDB workload:
+#
+#   surrealdb.deploy=true  → INGRESS lock-down on the surrealdb pods.
+#   surrealdb.deploy=false → EGRESS lock-down on the nucel client pods
+#                            (the DB itself is external/managed; firewall
+#                            it on its own side too — see
+#                            PRODUCTION_HARDENING.md).
+#
+# Requires a CNI that enforces NetworkPolicy (Calico, Cilium, …). On a CNI
+# that ignores policy these objects render but do nothing — hence opt-in.
+# ─────────────────────────────────────────────────────────────────────────────
+{{- if .Values.surrealdb.deploy }}
+# In-chart SurrealDB StatefulSet: default-deny ingress to :{{ $port }},
+# allow ONLY the in-namespace nucel client pods (server + worker +
+# worker-pool + seed + migrate all carry app.kubernetes.io/name=nucel),
+# plus any extra peers under surrealdb.networkPolicy.ingress.from.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "nucel.fullname" . }}-surrealdb
+  namespace: {{ include "nucel.namespace" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "nucel.surrealdbLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # nucel client pods in this namespace. server / worker / worker-pool
+        # / seed / migrate all carry the chart selector labels
+        # (app.kubernetes.io/name={{ include "nucel.name" . }} +
+        # app.kubernetes.io/instance={{ .Release.Name }}, from
+        # nucel.selectorLabels) — admit them, deny everything else.
+        - podSelector:
+            matchLabels:
+              {{- include "nucel.selectorLabels" . | nindent 14 }}
+        {{- with $np.ingress.from }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ $port }}
+{{- else }}
+# External / managed SurrealDB (surrealdb.deploy=false — Terraform
+# modules/surrealdb owns the StatefulSet). The chart can't attach an
+# ingress policy to pods it does not own, so it restricts the nucel client
+# pods' EGRESS on the DB port to the configured externalPeers instead.
+#
+# This is HALF the control. The DB side MUST also be firewalled (security
+# group / NetworkPolicy in the DB's own namespace) so other workloads in
+# the cluster can't reach :{{ $port }}. See PRODUCTION_HARDENING.md
+# "SurrealDB network isolation".
+#
+# !!  EGRESS DEFAULT-DENY WARNING !!
+# A NetworkPolicy with policyTypes:[Egress] makes egress DEFAULT-DENY for
+# every pod it selects — only the rules listed below are permitted. This
+# policy selects the server / worker / worker-pool / seed / migrate pods,
+# which need MUCH more than the DB port: the server also talks to S3
+# (HTTPS:443 — NUCEL_S3_* in configmap.yaml), SMTP, outbound webhooks, the
+# OIDC issuer, git remotes and container registries. To keep those working
+# this template emits a broad allow-all egress rule by default
+# (surrealdb.networkPolicy.allowAllOtherEgress=true). That keeps the
+# DB-port scoping informational rather than restrictive on its own; set
+# allowAllOtherEgress=false to make this a TRUE lock-down, in which case
+# you MUST enumerate every required peer under
+# surrealdb.networkPolicy.extraEgress (443 to S3/OIDC/webhooks/registry,
+# the SMTP port, …) or the platform breaks.
+{{- if $np.externalPeers }}
+{{- /*
+  MAJOR-2 guard — additive (union) NetworkPolicy conflict.
+
+  Kubernetes unions all NetworkPolicies that select a pod. If the existing
+  networkPolicy (networkPolicy.enabled=true) is in its DEFAULT egress mode
+  (egress.denyAll=false), it emits a `- {}` allow-all egress rule. That
+  allow-all UNIONs with this policy and NULLIFIES the DB-port egress
+  scoping here — the lock-down silently becomes a no-op. We refuse to
+  render rather than ship a security control that does nothing.
+
+  The combination is only coherent when EITHER:
+    - the main policy is off (networkPolicy.enabled=false), OR
+    - the main policy is in deny mode (networkPolicy.egress.denyAll=true),
+  OR the operator has explicitly opted into the broad-egress shape here
+  (surrealdb.networkPolicy.allowAllOtherEgress=true), in which case this
+  policy isn't trying to restrict non-DB egress anyway and the union is
+  intentional.
+*/ -}}
+{{- $mainNp := .Values.networkPolicy }}
+{{- $mainEgressAllowsAll := and $mainNp $mainNp.enabled (not (and $mainNp.egress $mainNp.egress.denyAll)) }}
+{{- $thisRestrictsEgress := not $np.allowAllOtherEgress }}
+{{- if and $mainEgressAllowsAll $thisRestrictsEgress }}
+{{- fail (printf "surrealdb.networkPolicy egress lock-down is a NO-OP: networkPolicy.enabled=true with networkPolicy.egress.denyAll=false emits a `- {}` allow-all egress rule that UNIONs with (and nullifies) the SurrealDB egress restriction (NetworkPolicies are additive). Fix ONE of: set networkPolicy.egress.denyAll=true (and populate networkPolicy.egress.to), set networkPolicy.enabled=false, or set surrealdb.networkPolicy.allowAllOtherEgress=true (acknowledging this is informational, not a lock-down). See PRODUCTION_HARDENING.md -> 'SurrealDB network isolation'.") }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "nucel.fullname" . }}-surrealdb-egress
+  namespace: {{ include "nucel.namespace" . }}
+  labels:
+    {{- include "nucel.labels" . | nindent 4 }}
+spec:
+  # Applies to every nucel pod that talks to the DB (server / worker /
+  # worker-pool / seed / migrate).
+  podSelector:
+    matchLabels:
+      {{- include "nucel.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # DNS so the DB hostname resolves. Scoped to surrealdb.networkPolicy.dnsPeers
+    # when set (e.g. the kube-dns pods); unscoped (port 53 to anywhere)
+    # otherwise, matching the existing client policy.
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+      {{- with $np.dnsPeers }}
+      to:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    # The external SurrealDB endpoint on the DB port only.
+    - to:
+        {{- toYaml $np.externalPeers | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: {{ $port }}
+    {{- if $np.allowAllOtherEgress }}
+    # Egress ESCAPE HATCH (default on). Without this, selecting the client
+    # pods with an Egress policy default-denies ALL their other egress —
+    # severing S3 (443), SMTP, webhooks, OIDC, git and the registry, all of
+    # which the server needs. This broad rule keeps them reachable so the
+    # DB-port block doesn't silently break the platform. Set
+    # allowAllOtherEgress=false for a true lock-down (then enumerate every
+    # required peer under extraEgress).
+    - {}
+    {{- else }}
+    # allowAllOtherEgress=false → TRUE egress lock-down. Only DNS, the DB
+    # port (above) and the extraEgress rules below are permitted. You MUST
+    # list every other peer the server needs (443 to S3/OIDC/webhooks/
+    # registry, the SMTP port, …) here or it is blocked.
+    {{- with $np.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- end }}
+{{- else }}
+# surrealdb.networkPolicy.enabled=true with deploy=false but no
+# externalPeers set: nothing to scope egress to. Set
+# surrealdb.networkPolicy.externalPeers to the DB endpoint (ipBlock /
+# namespaceSelector) to render the egress lock-down, and firewall the DB
+# on its own side. (No object rendered here to avoid an over-broad policy.)
+{{- end }}
+{{- end }}
+{{- end }}

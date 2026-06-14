@@ -94,6 +94,20 @@ securityContext:
 {{- end -}}
 
 {{/*
+nucel.surrealdbContainerSecurityContext — container-level securityContext
+for the in-chart SurrealDB container (audit #22). The StatefulSet's
+pod-level securityContext (runAsNonRoot 1000) is inlined in the template;
+this adds the container restricted profile. Renders nothing when empty.
+Usage: {{- include "nucel.surrealdbContainerSecurityContext" . | nindent 10 }}
+*/}}
+{{- define "nucel.surrealdbContainerSecurityContext" -}}
+{{- with (default (dict) .Values.surrealdb.containerSecurityContext) }}
+securityContext:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end -}}
+
+{{/*
 ─────────────────────────────────────────────────────────────────────────────
 Storage strategy helpers (#236 / #244).
 

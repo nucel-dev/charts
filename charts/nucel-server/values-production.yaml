@@ -94,6 +94,23 @@ externalSecrets:
 
 surrealdb:
   deploy: false  # managed by modules/surrealdb Terraform; chart does NOT create it
+  # Audit #22 SurrealDB egress hardening is OFF here by default (parity with
+  # the other off-by-default NetworkPolicy toggles). To enable it, set
+  # networkPolicy.enabled=true and externalPeers to the DB endpoint. Read the
+  # warnings in values.yaml → surrealdb.networkPolicy and PRODUCTION_HARDENING.md
+  # → "SurrealDB network isolation" FIRST: the deploy=false egress path is a
+  # full default-deny allowlist for the client pods, and a true lock-down
+  # (allowAllOtherEgress=false) requires networkPolicy.egress.denyAll=true or
+  # networkPolicy.enabled=false (the chart fails fast on the silent no-op combo).
+  # networkPolicy:
+  #   enabled: true
+  #   allowAllOtherEgress: false        # true egress lock-down
+  #   externalPeers:
+  #     - ipBlock: { cidr: 10.0.32.0/20 }   # <-- the managed SurrealDB subnet
+  #   extraEgress:
+  #     - ports:
+  #         - { protocol: TCP, port: 443 }   # S3 / OIDC / webhooks / registry
+  #         - { protocol: TCP, port: 587 }   # SMTP submission
 
 # Enable Prometheus alerting rules (requires kube-prometheus-stack in cluster).
 prometheus:

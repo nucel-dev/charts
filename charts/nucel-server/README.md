@@ -283,6 +283,22 @@ reading the values file.
 | `surrealdb.image` | `surrealdb/surrealdb:v3.0.5` | Pinned — must match the schema and TiKV protocol |
 | `surrealdb.tikvEndpoint` | `""` | Non-empty enables TiKV mode and skips the chart-managed PVC |
 | `surrealdb.storage` | `20Gi` | Used only when `tikvEndpoint` is empty |
+| `surrealdb.containerSecurityContext` | drop-ALL / no-priv-escalation / RuntimeDefault | Container-level restricted profile on the in-chart SurrealDB container (the pod already runs non-root uid/gid 1000) |
+| `surrealdb.networkPolicy.enabled` | `false` | Audit #22. Restricts who can reach SurrealDB's plaintext `ws://:8000`. `deploy=true` → ingress lock-down on the DB pods (only nucel clients); `deploy=false` → egress policy on the client pods (firewall the DB on its own side too). See PRODUCTION_HARDENING.md → "SurrealDB network isolation" |
+| `surrealdb.networkPolicy.ingress.from` | `[]` | Extra peers admitted to `:8000` when `deploy=true` (in addition to the in-namespace nucel clients) |
+| `surrealdb.networkPolicy.externalPeers` | `[]` | When `deploy=false`: the DB endpoint peer(s) the nucel client pods may reach on `:8000`. Empty = no egress object rendered |
+| `surrealdb.networkPolicy.allowAllOtherEgress` | `true` | **`deploy=false` egress escape hatch.** An Egress NetworkPolicy makes egress default-deny for the pods it selects. `true` (default) also emits a broad `- {}` allow-all rule so the server keeps its S3/SMTP/webhook/OIDC/git/registry egress — enabling the policy does NOT silently sever them; the DB-port rule is informational and the DB-side firewall is the real control. Set `false` for a true egress lock-down (then you must enumerate every other peer under `extraEgress`). |
+| `surrealdb.networkPolicy.extraEgress` | `[]` | `deploy=false`, `allowAllOtherEgress=false`: additional egress rules (`{ to, ports }`) you MUST supply so non-DB traffic (443 to S3/OIDC/webhooks/registry, the SMTP port, …) keeps flowing under the lock-down |
+| `surrealdb.networkPolicy.dnsPeers` | `[]` | `deploy=false`: optional `to` peers scoping the DNS (port 53) egress rule. Empty = DNS to anywhere (matches the main client policy); set to the kube-dns pods to tighten it |
+| `surrealdb.networkPolicy.port` | `8000` | SurrealDB ws port the policy gates |
+
+> **`deploy=false` egress is a full default-deny allowlist, and it unions
+> with the main `networkPolicy` block.** With `networkPolicy.enabled=true` at
+> its default `egress.denyAll=false`, the main policy's `- {}` allow-all
+> egress nullifies any SurrealDB egress restriction — so the chart **fails
+> fast** if you request a lock-down (`allowAllOtherEgress=false`) in that
+> combo. See PRODUCTION_HARDENING.md → "SurrealDB network isolation" for the
+> required mode combination.
 
 ### Storage
 
@@ -465,6 +481,31 @@ silently no-op). Enable to restrict ingress/egress for the server pods.
 | `networkPolicy.ingress.from` | `[]` | Extra ingress `from` peers (`namespaceSelector` / `podSelector` / `ipBlock`). Empty = allow the server ports from any source |
 | `networkPolicy.egress.denyAll` | `false` | When `true`, only DNS + `egress.to` entries are permitted; otherwise all egress is allowed |
 | `networkPolicy.egress.to` | `[]` | Allowed egress peers when `denyAll: true` |
+
+This policy selects the nucel **client** pods (server / worker). To restrict
+who can reach **SurrealDB** itself — which speaks plaintext `ws://:8000` — use
+the separate `surrealdb.networkPolicy.*` block (see the SurrealDB table above
+and PRODUCTION_HARDENING.md → "SurrealDB network isolation").
+
+### Pod / container securityContext
+
+All nucel workload pods (server, worker, worker-pool, migration Job, seed Job)
+and the in-chart SurrealDB container ship a hardened `securityContext` by
+default: `allowPrivilegeEscalation: false`, `capabilities.drop: ["ALL"]`,
+`seccompProfile: RuntimeDefault`. This is **most** of the Pod Security
+"restricted" profile but **not** the full thing: `runAsNonRoot` /
+`readOnlyRootFilesystem` are left **off** for the nucel pods because the
+published server image runs as root (uid 0), so these pods are not yet
+PSS-`restricted` compliant — they still run a root process (drop-ALL caps
+limits the blast radius). Flip the non-root pair on only against a non-root
+rebuilt image, which is the real fix and is tracked as a follow-up. The
+in-chart SurrealDB pod already runs non-root (uid/gid 1000). See
+PRODUCTION_HARDENING.md → "Non-root + restricted securityContext".
+
+| Key | Default | Notes |
+|---|---|---|
+| `podSecurityContext` | `seccompProfile: RuntimeDefault` | Pod-level SC for server / worker / worker-pool / migrate / seed. Extend with `runAsNonRoot` / `runAsUser` / `fsGroup` on a non-root image |
+| `containerSecurityContext` | drop-ALL / no-priv-escalation / RuntimeDefault | Container-level restricted profile for the same workloads |
 
 ### Basic-auth gate (pre-launch / staging)
 

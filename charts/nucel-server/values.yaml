@@ -316,6 +316,123 @@ surrealdb:
     limits:
       cpu: 1000m
       memory: 1Gi
+  # Container-level securityContext for the SurrealDB container. The
+  # StatefulSet already ships a pod-level securityContext
+  # (runAsNonRoot/runAsUser/runAsGroup/fsGroup 1000 — the surrealdb image
+  # runs fine non-root). This adds the container-level restricted profile
+  # to match the server/worker pods: drop ALL caps, no privilege
+  # escalation, RuntimeDefault seccomp. `readOnlyRootFilesystem` is left
+  # off because SurrealDB writes its embedded RocksDB/surrealkv store under
+  # /data (a PVC mount) but may also touch the rootfs for temp files; flip
+  # it on if your image tolerates it. Set to `{}` to emit nothing.
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+    # readOnlyRootFilesystem: true   # enable only if the image tolerates it
+  # -- NetworkPolicy guarding SurrealDB (audit #22).
+  #
+  # SurrealDB speaks plaintext ws:// on :8000 with no transport encryption,
+  # so any pod that can route to its Service can attempt to authenticate
+  # (and brute-force NUCEL_DB_USER/NUCEL_DB_PASS). This policy restricts
+  # who may reach it.
+  #
+  # Two shapes, picked by `surrealdb.deploy`:
+  #   - deploy=true  → the chart owns the SurrealDB StatefulSet, so it
+  #                    renders an INGRESS NetworkPolicy on the surrealdb
+  #                    pods that allows :8000 ONLY from the nucel client
+  #                    pods (server + worker + worker-pool + seed +
+  #                    migrate — all carry the chart selector labels
+  #                    app.kubernetes.io/name=<chart> + instance=<release>)
+  #                    plus any extra peers under `ingress.from`. Every
+  #                    other source is denied (default-deny once a
+  #                    NetworkPolicy selects the pod).
+  #   - deploy=false → SurrealDB is external/managed (Terraform
+  #                    modules/surrealdb). The chart can't put an ingress
+  #                    policy on pods it doesn't own, so it renders an
+  #                    EGRESS NetworkPolicy on the nucel client pods that
+  #                    only permits DB egress to `externalPeers` (the
+  #                    SurrealDB endpoint CIDR/namespace). You must ALSO
+  #                    firewall the DB side — see PRODUCTION_HARDENING.md
+  #                    "SurrealDB network isolation".
+  #
+  # Off by default so the chart still renders on clusters whose CNI does
+  # not enforce NetworkPolicy (Calico/Cilium/etc. required for it to bite).
+  #
+  # !!  EGRESS DEFAULT-DENY WARNING (deploy=false path) !!
+  # When deploy=false this block renders an EGRESS NetworkPolicy on the
+  # nucel client pods (server / worker / worker-pool / seed / migrate). A
+  # NetworkPolicy with policyTypes:[Egress] makes egress DEFAULT-DENY for
+  # the pods it selects — only the rules it lists are allowed. The server
+  # needs FAR more than the DB port: S3 over HTTPS:443 (NUCEL_S3_* wired in
+  # configmap.yaml), SMTP, outbound webhooks, the OIDC issuer, git remotes
+  # and container registries. So this policy ships an escape hatch
+  # (`allowAllOtherEgress: true`, below) that keeps all non-DB egress open
+  # by default — turning the policy on does NOT silently sever S3/SMTP/etc.
+  # Flip `allowAllOtherEgress: false` for a TRUE lock-down, and then you
+  # MUST enumerate every required peer under `extraEgress` (443 to
+  # S3/OIDC/webhooks/registry, the SMTP port, …) or the platform breaks.
+  #
+  # !!  ADDITIVE-POLICY CONFLICT (deploy=false path) !!
+  # NetworkPolicies are additive (union). With the main `networkPolicy`
+  # block ALSO enabled at its default `egress.denyAll: false`, that policy
+  # emits a `- {}` allow-all egress rule which UNIONs with — and nullifies
+  # — any egress restriction here. The chart fails fast on that exact silent
+  # no-op: a true SurrealDB egress lock-down (allowAllOtherEgress=false)
+  # requires EITHER networkPolicy.enabled=false OR
+  # networkPolicy.egress.denyAll=true. See PRODUCTION_HARDENING.md →
+  # "SurrealDB network isolation".
+  networkPolicy:
+    enabled: false
+    # Extra ingress `from` peers allowed to reach :8000 when deploy=true
+    # (in addition to the in-namespace nucel client pods, which are always
+    # allowed). Use to admit a DB admin/backup pod in another namespace.
+    # Each entry is a standard NetworkPolicyPeer
+    # (namespaceSelector / podSelector / ipBlock).
+    ingress:
+      from: []
+    # When deploy=false: the peers the nucel client pods are allowed to
+    # reach on the DB port for egress. Empty = no egress restriction is
+    # rendered (the policy degrades to ingress-only / no-op for the
+    # external case). Set this to the SurrealDB endpoint's ipBlock or the
+    # namespaceSelector of the namespace that hosts the external DB.
+    #   externalPeers:
+    #     - ipBlock:
+    #         cidr: 10.0.32.0/20      # SurrealDB subnet
+    externalPeers: []
+    # deploy=false EGRESS ESCAPE HATCH. When true (default), the egress
+    # policy ALSO emits a broad `- {}` allow-all rule so the client pods
+    # keep their S3/SMTP/webhook/OIDC/git/registry egress — i.e. enabling
+    # the policy scopes the DB port WITHOUT severing everything else. The
+    # DB-port rule is then informational (the union with `- {}` allows all
+    # egress anyway); use it together with a DB-side firewall (the real
+    # control for the external case). Set to FALSE for a true egress
+    # lock-down — only DNS, the DB port and `extraEgress` survive, so you
+    # must enumerate every other required peer under `extraEgress`.
+    allowAllOtherEgress: true
+    # deploy=false, allowAllOtherEgress=false: additional egress rules the
+    # operator MUST supply so the server's non-DB traffic keeps flowing
+    # under the lock-down. Each entry is a full NetworkPolicyEgressRule
+    # ({ to: [...], ports: [...] }). Example covering S3/HTTPS + SMTP:
+    #   extraEgress:
+    #     - ports:
+    #         - { protocol: TCP, port: 443 }   # S3 / OIDC / webhooks / registry
+    #         - { protocol: TCP, port: 587 }   # SMTP submission
+    extraEgress: []
+    # deploy=false: optional `to` peers that scope the DNS (port 53) egress
+    # rule. Empty = DNS allowed to anywhere (matches the main client
+    # policy). Set to the kube-dns pods to tighten it, e.g.:
+    #   dnsPeers:
+    #     - namespaceSelector:
+    #         matchLabels: { kubernetes.io/metadata.name: kube-system }
+    #       podSelector:
+    #         matchLabels: { k8s-app: kube-dns }
+    dnsPeers: []
+    # The port SurrealDB listens on (ws). Matches the Service/containerPort.
+    port: 8000
 
 # -- Persistent storage sizes
 #
