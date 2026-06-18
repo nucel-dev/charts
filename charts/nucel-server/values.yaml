@@ -861,6 +861,10 @@ agentWorkflows:
     # ANTHROPIC_API_KEY. Injected into the runner pod via secretKeyRef
     # with optional:true. Defaults to "nucel-aw-anthropic".
     anthropicSecret: "nucel-aw-anthropic"
+    # openrouterSecret: name of the K8s Secret that holds NUCEL_OPENROUTER_KEY.
+    # When set, the runner prefers OpenRouter over Anthropic for all LLM calls.
+    # Created automatically when secrets.openrouterKey is set. Defaults to "nucel-aw-openrouter".
+    openrouterSecret: "nucel-aw-openrouter"
   tickPeriodSeconds: 300
   # Wave M: per-workflow manual-trigger cap (per minute). Drain
   # protection against a misbehaving operator hammering the

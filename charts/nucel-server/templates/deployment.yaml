@@ -204,6 +204,10 @@ spec:
             - name: NUCEL_AW_ANTHROPIC_SECRET
               value: {{ .Values.agentWorkflows.k8s.anthropicSecret | quote }}
             {{- end }}
+            {{- if .Values.agentWorkflows.k8s.openrouterSecret }}
+            - name: NUCEL_AW_OPENROUTER_SECRET
+              value: {{ .Values.agentWorkflows.k8s.openrouterSecret | quote }}
+            {{- end }}
             {{- end }}
             - name: NUCEL_AW_TICK_PERIOD_SECS
               value: {{ .Values.agentWorkflows.tickPeriodSeconds | quote }}
