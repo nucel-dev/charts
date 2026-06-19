@@ -243,9 +243,10 @@ migrations:
   #     hook-succeeded         → success cleans up automatically; failures
   #                              persist for `kubectl logs job/...` debugging
   backoffLimit: 2
-  # Hard ceiling on migration runtime (seconds). 600s = 10min headroom;
-  # actual apply_schema runs in <30s on a warm cluster.
-  activeDeadlineSeconds: 600
+  # Hard ceiling on migration runtime (seconds). schema.surql has 1054 DEFINE
+  # statements; against 3-replica TiKV Raft each DDL write needs quorum, so
+  # full apply can take 15–20 min. 1800s (30min) gives safe headroom.
+  activeDeadlineSeconds: 1800
   resources:
     requests:
       cpu: 100m
