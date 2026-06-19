@@ -19,6 +19,14 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create", "delete", "patch"]
+  # AW dispatch: per-run egress NetworkPolicy. Applied BEFORE the Job so
+  # the runner pod has default-deny egress from the instant it schedules
+  # (no unrestricted-egress window for a pod holding a scoped PAT +
+  # NUCEL_OPENROUTER_KEY); patched with the Job ownerRef for GC and DELETEd
+  # on run completion / stuck-runner sweep.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "delete", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

@@ -865,6 +865,13 @@ agentWorkflows:
     # When set, the runner prefers OpenRouter over Anthropic for all LLM calls.
     # Created automatically when secrets.openrouterKey is set. Defaults to "nucel-aw-openrouter".
     openrouterSecret: "nucel-aw-openrouter"
+    # serverNamespace / serverPodSelector: identify the nucel-server pods for
+    # the runner egress NetworkPolicy's callback-allow rule. Leave blank to
+    # default to this release's own namespace and selectorLabels
+    # (app.kubernetes.io/name=<chart name>). serverPodSelector is a single
+    # `key=value` label.
+    serverNamespace: ""
+    serverPodSelector: ""
   tickPeriodSeconds: 300
   # Wave M: per-workflow manual-trigger cap (per minute). Drain
   # protection against a misbehaving operator hammering the

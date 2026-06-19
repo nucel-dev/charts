@@ -208,6 +208,16 @@ spec:
             - name: NUCEL_AW_OPENROUTER_SECRET
               value: {{ .Values.agentWorkflows.k8s.openrouterSecret | quote }}
             {{- end }}
+            # Egress NetworkPolicy targeting: tell the dispatcher which
+            # namespace + pod selector identify nucel-server so the
+            # runner→server callback egress rule is precise. Defaults to
+            # this release's own namespace + selectorLabels.
+            - name: NUCEL_AW_SERVER_NAMESPACE
+              value: {{ .Values.agentWorkflows.k8s.serverNamespace | default (include "nucel.namespace" .) | quote }}
+            - name: NUCEL_AW_SERVER_POD_SELECTOR
+              value: {{ .Values.agentWorkflows.k8s.serverPodSelector | default (printf "app.kubernetes.io/name=%s" (include "nucel.name" .)) | quote }}
+            - name: NUCEL_AW_SERVER_PORT
+              value: {{ .Values.server.port | quote }}
             {{- end }}
             - name: NUCEL_AW_TICK_PERIOD_SECS
               value: {{ .Values.agentWorkflows.tickPeriodSeconds | quote }}

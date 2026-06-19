@@ -2,7 +2,7 @@ apiVersion: v2
 name: nucel-server
 description: Self-hosted git platform with built-in CI/CD, container registry, and AI agent orchestration.
 type: application
-version: 0.1.39
+version: 0.1.40
 appVersion: "0.5.27"
 home: https://nucel.dev
 sources:
