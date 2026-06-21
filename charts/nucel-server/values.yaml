@@ -724,6 +724,11 @@ secrets:
   # (the server reads the host key from a file via that env var — see
   # crates/nucel-server/src/ssh/mod.rs::load_or_generate_host_key).
   sshHostKey: ""
+  # AES-256-GCM master key for encrypting BYOK API keys and CI/org secrets
+  # (`NUCEL_SECRET_ENCRYPTION_KEY`). Format: 64 hex chars = openssl rand -hex 32.
+  # H-7: auto-generated on first install; carried forward via `lookup` on upgrades.
+  # When `secrets.requireProductionValues=true` this field is required.
+  secretEncryptionKey: ""
   # Bearer token Prometheus must send as `Authorization: Bearer <token>`
   # to scrape /metrics. When unset the endpoint serves anonymously
   # (typical for local dev). In any environment where /metrics is
