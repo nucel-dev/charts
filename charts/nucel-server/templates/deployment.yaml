@@ -118,6 +118,21 @@ spec:
                   name: {{ include "nucel.secretName" . }}
                   key: NUCEL_SESSION_KEY
                   optional: true
+            # AES-256-GCM master key for the secret vault (BYOK keys + CI/org
+            # secrets, encrypted at rest before reaching SurrealDB — see
+            # crates/nucel-db/src/secret.rs). `optional: true` so the pod still
+            # boots in dev overlays where the server falls back to the
+            # deterministic dev key (with NUCEL_ALLOW_DEV_SECRETS=1). In
+            # production the chart-managed Secret always populates this and the
+            # server fails fast at boot if it's missing/weak (main.rs L1 guard).
+            # Generate-once-then-preserve — rotating it makes all stored secrets
+            # undecryptable (see templates/secret.yaml).
+            - name: NUCEL_SECRET_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" . }}
+                  key: NUCEL_SECRET_ENCRYPTION_KEY
+                  optional: true
             # Metrics bearer token (Fix H9 — required when
             # prometheus.requireAuth=true). `optional: true` so the pod
             # still boots in dev overlays that disable the requirement.
