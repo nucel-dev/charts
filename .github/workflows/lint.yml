@@ -58,6 +58,7 @@ jobs:
             --set secrets.sessionKey=$(openssl rand -hex 64) \
             --set secrets.oidcPrivateKey=ci-test-oidc-key \
             --set secrets.metricsToken=$(openssl rand -base64 32) \
+            --set secrets.secretEncryptionKey=$(openssl rand -hex 32) \
             > /tmp/ns-prod.yaml
           test -s /tmp/ns-prod.yaml
 
@@ -68,6 +69,7 @@ jobs:
             --set secrets.sessionKey=$(openssl rand -hex 64) \
             --set secrets.oidcPrivateKey=ci-test-oidc-key \
             --set secrets.metricsToken=$(openssl rand -base64 32) \
+            --set secrets.secretEncryptionKey=$(openssl rand -hex 32) \
             --set hpa.enabled=true \
             --set hpa.minReplicas=3 \
             --set hpa.maxReplicas=30 \
