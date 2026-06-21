@@ -98,3 +98,12 @@ data:
   {{- end }}
   NUCEL_REQUIRE_VERIFIED_EMAIL: {{ .Values.email.requireVerifiedEmail | default false | quote }}
   {{- end }}
+  # Closed-beta + super-admin knobs. Plain config (not secrets):
+  #   NUCEL_INVITE_ONLY  — true gates public registration behind a valid
+  #     signup-invite token (waitlist+approve flow).
+  #   NUCEL_ADMIN_USERS  — comma-separated usernames granted the /admin
+  #     operator portal + /api/v1/admin/*. Empty ⇒ nobody is admin.
+  # Always emitted so flipping the value in an overlay rolls the Deployment
+  # (the env is the trust anchor; there is no in-DB admin flag).
+  NUCEL_INVITE_ONLY: {{ .Values.server.inviteOnly | default false | quote }}
+  NUCEL_ADMIN_USERS: {{ .Values.server.adminUsers | default "" | quote }}
