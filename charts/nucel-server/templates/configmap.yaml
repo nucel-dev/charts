@@ -98,3 +98,14 @@ data:
   {{- end }}
   NUCEL_REQUIRE_VERIFIED_EMAIL: {{ .Values.email.requireVerifiedEmail | default false | quote }}
   {{- end }}
+  # Closed-beta gate and operator admin (§12 B1).
+  # `server.inviteOnly: true` locks registration to invited users only.
+  # `server.adminUsers` is a comma-separated list of usernames that get
+  # access to the /admin operator portal. Both default to "off" (open
+  # signup, no admins) so existing installs are unaffected.
+  {{- if .Values.server.inviteOnly }}
+  NUCEL_INVITE_ONLY: {{ .Values.server.inviteOnly | quote }}
+  {{- end }}
+  {{- if .Values.server.adminUsers }}
+  NUCEL_ADMIN_USERS: {{ .Values.server.adminUsers | quote }}
+  {{- end }}

@@ -15,6 +15,13 @@ server:
   replicas: 1
   port: 17321
   sshPort: 2222
+  # Set to "true" to enable closed-beta / invite-only mode. When true,
+  # registration requires a valid invite token; open signup is disabled.
+  inviteOnly: false
+  # Comma-separated list of usernames that receive operator super-admin
+  # access (the /admin portal and /api/v1/admin/* endpoints). Empty = no
+  # admins (fail-closed). Example: "alice,bob"
+  adminUsers: ""
   resources:
     requests:
       cpu: 200m
