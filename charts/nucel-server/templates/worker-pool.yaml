@@ -62,6 +62,20 @@ spec:
                 secretKeyRef:
                   name: {{ include "nucel.secretName" $ }}
                   key: NUCEL_HOOK_SECRET
+            # AES-256-GCM master key for the secret vault (BYOK keys + CI/org
+            # secrets). Each pool runs the same nucel-worker binary and decrypts
+            # these at job-execution time (see crates/nucel-db/src/secret.rs), so
+            # every pool needs the SAME key as the server. Without it the pool
+            # would silently fall back to the deterministic platform key and fail
+            # to decrypt anything the server wrote. `optional: false` so a
+            # misconfigured Secret fails the pod loudly instead of corrupting
+            # BYOK/CI secret reads.
+            - name: NUCEL_SECRET_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nucel.secretName" $ }}
+                  key: NUCEL_SECRET_ENCRYPTION_KEY
+                  optional: false
             {{- if $.Values.secrets.oidcPrivateKey }}
             - name: NUCEL_OIDC_PRIVATE_KEY
               valueFrom:
