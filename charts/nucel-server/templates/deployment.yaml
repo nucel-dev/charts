@@ -305,7 +305,12 @@ spec:
           {{- $readiness := default (dict) $probes.readiness }}
           readinessProbe:
             httpGet:
-              path: /health
+              # /readyz runs a cheap DB round-trip and returns 503 when
+              # SurrealDB is unreachable — Kubernetes pulls the pod from
+              # service endpoints without restarting it. /health (liveness)
+              # is always-200; using it for readiness would keep the pod in
+              # rotation even when the DB is down.
+              path: /readyz
               port: http
             initialDelaySeconds: {{ $readiness.initialDelaySeconds | default 5 }}
             periodSeconds: {{ $readiness.periodSeconds | default 10 }}

@@ -45,6 +45,12 @@ server:
   # (30 * 5s = 150s here) is the hard ceiling before the pod is restarted.
   # Leave `startup.enabled: false` to fall back to initialDelaySeconds on
   # the liveness probe (the pre-0.1.36 behaviour).
+  # Probe paths:
+  #   /health  → liveness: always 200 while the process is up, no DB touch.
+  #   /readyz  → readiness: cheap DB round-trip; 503 if SurrealDB is down
+  #              (Kubernetes removes the pod from service endpoints without
+  #              restarting it). Both paths bypass the HTTP rate limiter so
+  #              kubelet and ALB health-checker traffic never gets 429'd.
   probes:
     startup:
       enabled: true
