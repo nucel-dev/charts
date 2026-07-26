@@ -270,6 +270,27 @@ domain: nucel.dev
 oidc:
   issuer: "https://nucel.dev"
 
+# -- OCI container registry (`/v2/`).
+#
+# `externalUrl` is the public origin docker/podman/skopeo reach the registry
+# on. It becomes the `realm` of the Bearer challenge:
+#
+#   WWW-Authenticate: Bearer realm="<externalUrl>/v2/token",service="nucel"
+#
+# That is the URL every client is told to POST its credentials to, so a value
+# pointing at the wrong domain hands those credentials to the wrong host. SET
+# IT PER ENVIRONMENT — it has no safe default, which is why it ships empty.
+#
+# Do NOT reuse `email.baseUrl` / `NUCEL_BASE_URL` here (see the comment on
+# `email` below). When this is empty the server falls back to `oidc.issuer`
+# and then to the request's own Host, and REFUSES (logging at `error`) any
+# configured origin whose host differs from the one the request arrived on —
+# so an unset value degrades safely rather than silently misdirecting clients.
+#
+#   --set "registry.externalUrl=https://nucel.example.com"
+registry:
+  externalUrl: ""
+
 # -- Email backend (MVP audit L11 — SMTP-based, no SES SDK).
 #
 # `smtpUrl` is required for any kind of mail to leave the cluster. When
@@ -286,6 +307,23 @@ oidc:
 # domain SES is authorized to send for. `baseUrl` is the public origin
 # used to build verification / reset links — it should match the
 # ingress host or the email link will land on the wrong server.
+#
+# ⚠️ `baseUrl` (rendered as `NUCEL_BASE_URL`) is EMAIL-ONLY. It is a link
+# origin for outbound mail and nothing else. Do NOT reuse it as "the
+# instance's public URL" for any other subsystem:
+#
+#   * the default below is the chart's placeholder, and because nothing
+#     but the mailer has ever read it, real deployments run with the
+#     placeholder without anyone noticing. It is NOT a reliable source of
+#     truth for where this instance actually lives;
+#   * a subsystem that inherits it can end up publishing the wrong origin
+#     to clients. The OCI registry's `WWW-Authenticate` realm is the
+#     motivating case: it would have told docker clients to send their
+#     credentials to whatever domain the mail settings named. It uses
+#     `registry.externalUrl` instead (see above).
+#
+# Use `registry.externalUrl` for the registry, `oidc.issuer` for identity,
+# and this only for mail. Every environment should set all three explicitly.
 #
 # `requireVerifiedEmail` is a placeholder flag for the future
 # email-verification *requirement* (block login / write operations
