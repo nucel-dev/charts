@@ -99,6 +99,60 @@ helm --kube-context=neoconto -n nucel upgrade nucel charts/nucel-server \
 If using IRSA (recommended on EKS), no `accessKeyId`/`secretAccessKey` is
 needed — the pod's mounted ServiceAccount token authenticates to S3.
 
+### 4. OCI registry external URL (`registry.externalUrl`)
+
+**Why this matters now.** The registry's Bearer challenge names a `realm` —
+the URL every docker/podman/skopeo client is told to send its credentials to:
+
+```
+WWW-Authenticate: Bearer realm="<origin>/v2/token",service="nucel"
+```
+
+A realm on the wrong domain is a credential-disclosure vector, not merely a
+broken handshake.
+
+**Live state on `neoconto` at the time of writing** (from
+`configmap/nucel-nucel-server-config`, injected via `envFrom`):
+
+| Key | Value | Correct? |
+|---|---|---|
+| `NUCEL_OIDC_ISSUER` | `https://nucel.neoconto.com` | ✅ |
+| `NUCEL_BASE_URL` | `https://nucel.dev` | ❌ — never overridden from the chart default |
+
+`NUCEL_BASE_URL` comes from `email.baseUrl` and is an EMAIL setting (link
+origin for outbound mail). Nothing else has ever read it, which is exactly why
+the placeholder survived unnoticed. The registry therefore does **not** use it;
+it uses `registry.externalUrl`, falling back to `oidc.issuer` and then the
+request's own Host, and refuses (logging at `error`) any configured origin
+whose host differs from the one the request arrived on.
+
+Set it explicitly anyway — relying on a fallback is how the next one of these
+happens:
+
+```bash
+helm --kube-context=neoconto -n nucel upgrade nucel charts/nucel-server \
+  --reuse-values \
+  --set "registry.externalUrl=https://nucel.neoconto.com"
+```
+
+Separately, `email.baseUrl` on this release is still the placeholder
+`https://nucel.dev`, so verification / password-reset links currently point at
+the wrong host. Fix it in the same roll:
+
+```bash
+  --set "email.baseUrl=https://nucel.neoconto.com"
+```
+
+Verify afterwards:
+
+```bash
+kubectl --context=neoconto -n nucel get cm nucel-nucel-server-config \
+  -o jsonpath='{.data.NUCEL_REGISTRY_EXTERNAL_URL}{"\n"}{.data.NUCEL_BASE_URL}{"\n"}'
+curl -sSI https://nucel.neoconto.com/v2/ | grep -i www-authenticate
+```
+
+The `realm` in that header must be `https://nucel.neoconto.com/v2/token`.
+
 ## What's still silently disabled
 
 - `[def]` CI worker loop (Docker socket) — agent #226 owns the decoupling.

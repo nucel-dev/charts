@@ -25,6 +25,22 @@ data:
   NUCEL_LOG_LEVEL: {{ .Values.logging.level | quote }}
   RUST_LOG: {{ .Values.logging.rustLog | quote }}
   NUCEL_OIDC_ISSUER: {{ .Values.oidc.issuer | quote }}
+  # OCI registry: the public origin docker/podman/skopeo clients reach this
+  # registry on. It becomes the `realm` of the
+  # `WWW-Authenticate: Bearer realm="<origin>/v2/token"` challenge — i.e. the
+  # URL every client is told to send its credentials to. A wrong value is a
+  # credential-disclosure bug, not just a broken handshake.
+  #
+  # Do NOT confuse this with `NUCEL_BASE_URL` (`email.baseUrl`), which is the
+  # EMAIL origin. Leaving this unset makes the server fall back to
+  # `NUCEL_OIDC_ISSUER` and then to the request's own Host, and refuse (with an
+  # `error!` log) any configured origin that names a different host than the
+  # request arrived on.
+  {{- if .Values.registry }}
+  {{- if .Values.registry.externalUrl }}
+  NUCEL_REGISTRY_EXTERNAL_URL: {{ .Values.registry.externalUrl | quote }}
+  {{- end }}
+  {{- end }}
   # Browsers silently drop a Secure cookie over plain HTTP, so this
   # opts in only when the deployment sits behind HTTPS (typical
   # production / preview environments). Defaults to "1" because
