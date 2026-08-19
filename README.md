@@ -50,7 +50,7 @@ published channel works. This is the honest state as of 2026-08-18.
 |---|---|---|
 | `https://charts.nucel.dev` | this repo, via `release.yml` | **Broken.** `charts.nucel.dev` has no DNS record — `helm repo add` fails to connect. `gh-pages` here holds a valid `index.yaml` (nucel-server up to 0.1.41, agent-operator 0.2.0) but nothing serves it: there is no `CNAME` file on `gh-pages`, and `nucel-dev.github.io/charts/index.yaml` 404s. |
 | `oci://ghcr.io/nucel-dev/charts/nucel-server` | **the `nucel` repo**, via its `.github/workflows/docker.yml` on tag pushes | Active. This is the default `chart_source` for `nucel-infra`'s EKS stack. It publishes the `nucel` repo's own copy of the chart, not this one. |
-| `oci://588738611061.dkr.ecr.eu-south-2.amazonaws.com/charts/*` | pushed by hand | Stale. `charts/nucel-server` carries only 0.1.7, 0.1.8, 0.1.9 (last pushed 2026-05-21). `charts/agent-operator` carries only 0.1.0. |
+| `oci://588738611061.dkr.ecr.eu-south-2.amazonaws.com/charts/*` | pushed by hand | Stale. `charts/nucel-server` carries ten tags, 0.1.0 through 0.1.9 (last pushed 2026-05-21), plus two untagged manifests. `charts/agent-operator` carries only 0.1.0. |
 | Local path | this repo | What `nucel-infra`'s `neoconto` env is configured to use: `nucel_chart_source = "../../../charts/charts/nucel-server"`. |
 
 ### The two-copy problem
@@ -67,19 +67,30 @@ Against the `nucel` copy, this repo's `nucel-server` differs in 23 files and is
 missing five: `templates/scheduler-deployment.yaml`, `templates/ssh-service.yaml`,
 `templates/worker-pdb.yaml`, `values-ha.yaml`, and `values-neoconto-scale.yaml`.
 
-The divergence has consequences you can hit today. One concrete example: the
-`nucel` copy defaults `domain: ""` and guards it in `_helpers.tpl`; this repo's
-copy still hardcodes `domain: nucel.dev` with no guard, so an install that
-forgets to set `domain` silently renders an Ingress for `nucel.dev`, an OIDC
-issuer of `https://nucel.dev`, and password-reset links pointing at a domain
-that is not this instance.
+The divergence has consequences you can hit today. One concrete example: this
+repo's copy hardcodes the public hostname in four independent places, none of
+which is derived from any other and none of which is guarded — `domain`
+(`values.yaml:269`, the Ingress host), `oidc.issuer` (271, rendered as
+`NUCEL_OIDC_ISSUER`), and `email.from` / `email.baseUrl` (298-299, rendered as
+`NUCEL_EMAIL_FROM` / `NUCEL_BASE_URL`). All four default to `nucel.dev`, and
+`.Values.domain` is referenced only by `templates/ingress.yaml`. So
+`--set domain=<your-host>` fixes the Ingress host and nothing else: the OIDC
+issuer and the origin baked into outbound mail still say `https://nucel.dev`.
+The `nucel` copy fixed this by defaulting `domain: ""` and resolving the origin
+through a `nucel.publicOrigin` helper in `_helpers.tpl` that hard-`fail`s when
+neither `domain` nor `email.baseUrl` is set. Its `fail` message is worth reading
+before you install this copy: `NUCEL_BASE_URL` is interpolated into
+password-reset and email-verification links, so a placeholder host mails
+single-use account-takeover tokens, in the query string, to a domain you do not
+control.
 
 The live `neoconto` cluster runs release `nucel` at chart **`nucel-server-0.1.44`**
 — a version that has never existed in this repo (`main` is 0.1.41; `gh-pages`
 tops out at 0.1.41). 0.1.44 was cut in the `nucel` repo on 2026-07-25, the same
 day the release was deployed. **The running deployment is therefore not
-reproducible from this repo.** `agent-operator` on that cluster runs chart 0.1.0,
-two minor versions behind the 0.2.0 here.
+reproducible from this repo.** `agent-operator` on that cluster runs chart 0.1.0
+— one minor version behind the 0.2.0 here, and two behind the `agent-operator`
+repo's 0.3.0.
 
 Nothing automates a sync between the copies. Until that is resolved, treat the
 `nucel` repo's `charts/nucel-server` as the one that ships, and this repo as the
@@ -142,11 +153,20 @@ helm upgrade --install nucel ./charts/nucel-server \
   --namespace nucel --create-namespace \
   -f ./charts/nucel-server/values-production.yaml \
   --set domain=nucel.example.com \
+  --set oidc.issuer=https://nucel.example.com \
+  --set email.baseUrl=https://nucel.example.com \
+  --set email.from='Nucel <no-reply@nucel.example.com>' \
   --set image.repository=<your-registry>/nucel-server \
   --set externalSecrets.secretStoreRef.name=<your ClusterSecretStore> \
   --set storage.classes.pages.s3.bucket=<bucket> \
   --set storage.classes.gitWorkspaces.s3.bucket=<bucket>
 ```
+
+The three hostname values after `domain` are not optional decoration. Omit them
+and the render still succeeds, but `NUCEL_OIDC_ISSUER`, `NUCEL_BASE_URL` and
+`NUCEL_EMAIL_FROM` all come out as `nucel.dev` — see
+[the two-copy problem](#the-two-copy-problem) for why they are four separate
+values here.
 
 Because `secrets.create` is false on this path, any `--set secrets.*` you pass
 alongside the overlay is **silently ignored** — the chart renders an
@@ -162,6 +182,9 @@ the guard enforces all four keys:
 helm upgrade --install nucel ./charts/nucel-server \
   --namespace nucel --create-namespace \
   --set domain=nucel.example.com \
+  --set oidc.issuer=https://nucel.example.com \
+  --set email.baseUrl=https://nucel.example.com \
+  --set email.from='Nucel <no-reply@nucel.example.com>' \
   --set image.repository=<your-registry>/nucel-server \
   --set nodePool.create=false \
   --set secrets.sessionKey="$(openssl rand -hex 64)" \
@@ -170,9 +193,14 @@ helm upgrade --install nucel ./charts/nucel-server \
   --set secrets.metricsToken="$(openssl rand -base64 32)"
 ```
 
-This path renders the Secret but not the rest of the overlay's HA posture (HPA
-bounds, PDB, PriorityClasses, zone spread, RWX/S3 storage) — add those yourself
-or copy them out of `values-production.yaml`.
+Part of the overlay's HA posture is already in the base defaults, so this path
+gets it for free: the PodDisruptionBudget (`minAvailable: 1`) and the two-axis
+`topologySpreadConstraints` across `kubernetes.io/hostname` and
+`topology.kubernetes.io/zone` render identically here and under the overlay.
+What is genuinely overlay-only is the HPA and its bounds, the two
+PriorityClasses, `ReadWriteMany` PVCs and the S3 storage classes, and the
+ServiceMonitor + PrometheusRule. Add those yourself or copy them out of
+`values-production.yaml`.
 
 `PRODUCTION_HARDENING.md` covers the required-values guard, secret generation and
 the post-install verification checklist for both.
@@ -303,8 +331,8 @@ provisioner (NFS, CephFS, Longhorn) — there is no default.
 
 Both charts are shared between an arm64 EKS environment and an amd64 Hetzner
 environment. Two defaults in `nucel-server` are written for the EKS side and
-will hurt you elsewhere. This has caused a real outage; treat it as the first
-thing to check when porting an install.
+will hurt you elsewhere, and a third bites the `agent-operator` chart. Check all
+three when porting an install.
 
 **1. `nodePool.create` defaults to `true` and is EKS-only.**
 
@@ -349,7 +377,21 @@ general pool is arm64-only. On an amd64 cluster the seed Job is scheduled
 against nodes that do not exist and sits `Pending` forever. Override
 `seed.nodeSelector` (or clear it) when `seed.enabled=true` off EKS.
 
-Beyond those two: `values-production.yaml` sizes the HPA ceiling (30) to the
+**3. `agent-operator` ships no `nodeSelector` at all.**
+
+Both Deployments in `charts/agent-operator/values.yaml` default to
+`nodeSelector: {}` (lines 57 and 76). This is the one hazard here with a
+recorded incident behind it. `nucel-infra` commit `1324f47`
+("fix(neoconto): pin agent-operator to arm64 nodes") records that on the
+mixed-arch `neoconto` cluster the operator Deployment sat in `ImagePullBackOff`
+for over three days and 20k+ retries: the images carried only a `linux/arm64`
+manifest, the empty selector let the scheduler put the pod on one of the amd64
+nodes, and the webhook came up only because it happened to land on an arm64 one.
+That fix was applied in `nucel-infra`, not here — the live Deployments now carry
+`kubernetes.io/arch: arm64` while this chart still defaults to `{}`. Pin it
+yourself on any mixed-arch cluster.
+
+Beyond those three: `values-production.yaml` sizes the HPA ceiling (30) to the
 arm64 NodePool's 100-CPU limit, the ingress annotation examples assume the AWS
 Load Balancer Controller, and `serviceAccount.annotations` examples assume IRSA.
 None of those break a Hetzner install, but none of them help it either.
@@ -375,9 +417,13 @@ helm template t charts/nucel-server \
   --set storage.classes.gitWorkspaces.s3.bucket=some-bucket
 
 # check a single template
+# --show-only errors out if the template renders nothing, so a conditional
+# template needs whatever toggle gates it — here surrealdb.networkPolicy.
 helm template t charts/nucel-server \
   --set secrets.requireProductionValues=false \
   --set prometheus.requireAuth=false \
+  --set surrealdb.deploy=true \
+  --set surrealdb.networkPolicy.enabled=true \
   --show-only templates/surrealdb-networkpolicy.yaml
 ```
 
@@ -472,10 +518,14 @@ Recorded so nobody rediscovers them the hard way.
 - **Two diverged copies of both charts** in other repos, with no sync
   automation. The live cluster runs a `nucel-server` version that does not exist
   here.
-- **`domain` defaults to `nucel.dev` and is not guarded** in this copy. Forgetting
-  to set it produces a working-looking install whose Ingress host, OIDC issuer
-  and email links all point somewhere else. The `nucel` repo's copy fixed this;
-  this one has not.
+- **Four separate values default to `nucel.dev`, and none is guarded** in this
+  copy: `domain`, `oidc.issuer`, `email.from` and `email.baseUrl`. `domain`
+  drives only the Ingress host — it is referenced nowhere but
+  `templates/ingress.yaml` — so setting it alone leaves `NUCEL_OIDC_ISSUER` and
+  the `NUCEL_BASE_URL` that outbound password-reset links are built from still
+  pointing at `nucel.dev`. The `nucel` repo's copy fixed this by deriving the
+  origin from `domain` and failing the render when neither it nor
+  `email.baseUrl` is set; this one has not.
 - **`metrics.serviceMonitor.*` is inert.** It defaults to `enabled: true` but no
   template consumes it — the only key that creates a ServiceMonitor is
   `prometheus.serviceMonitor.enabled`, which defaults to `false`. CI does not
@@ -492,7 +542,7 @@ Recorded so nobody rediscovers them the hard way.
 - **`CHANGELOG.md` stops at 0.1.39** while `Chart.yaml` is at 0.1.41.
 - **`charts/nucel-server/README.md` header cites 0.1.15 / 0.5.9**, several
   releases behind.
-- The ECR OCI mirrors are stale (`nucel-server` 0.1.7–0.1.9, `agent-operator`
+- The ECR OCI mirrors are stale (`nucel-server` 0.1.0–0.1.9, `agent-operator`
   0.1.0) and should not be treated as a distribution channel.
 
 ## License
